@@ -1,0 +1,101 @@
+variable,dataset,stage,data_type,description,modeling_notes
+input_url,both,identifier,string,Normalized input URL for the site (https:// prepended if missing).,ID column; drop before modeling.
+registered_domain,both,identifier,string,"Registrable domain of the site (e.g., example.edu), via tldextract if installed.",ID column; drop before modeling. Join key for labels.
+tld,site_features.csv,scraped,string,"Top-level domain / public suffix of the site (edu, com, ac.uk, ...).",Encoded as dummy flags in model matrix.
+crawl_timestamp,site_features.csv,scraped,string (ISO 8601),UTC timestamp when the crawl of this site began.,Record alongside labels; sites change over time.
+crawl_error,site_features.csv,scraped,string or null,Exception message if the site could not be crawled; null on success.,Converted to crawl_failed flag in model matrix.
+pages_crawled,both,scraped,int,"Number of HTML pages successfully retrieved and parsed (BFS, capped at CONFIG max_pages_per_site).",Also a size proxy; beware size-fraud confounding.
+robots_blocked_count,both,scraped,int,Number of queued URLs skipped because robots.txt disallowed them.,
+landing_status_code,both,scraped,int,HTTP status code returned by the landing page.,
+https_redirect,both,scraped,bool (0/1 in matrix),Whether the final landing URL after redirects uses HTTPS.,
+total_a_tags,site_features.csv,scraped,int,Total <a> anchor tags across all crawled pages.,log1p version in model matrix.
+total_internal_links,site_features.csv,scraped,int,Total links pointing to the same registered domain (incl. subdomains).,log1p + per-page versions in model matrix.
+total_external_links,site_features.csv,scraped,int,Total links pointing to other registered domains.,log1p + per-page versions in model matrix.
+total_words,site_features.csv,scraped,int,Sum of visible-text word counts across all crawled pages (scripts/styles stripped).,log1p version in model matrix.
+avg_words_per_page,both,scraped,float,total_words / pages_crawled.,
+total_images,site_features.csv,scraped,int,Total <img> tags across all crawled pages.,log1p version in model matrix.
+avg_images_per_page,both,scraped,float,total_images / pages_crawled.,
+img_alt_coverage,both,scraped,"float [0,1]",Share of <img> tags with non-empty alt text; accessibility/professionalism proxy.,Null if site has no images.
+total_html_bytes,site_features.csv,scraped,int,Total raw HTML bytes across crawled pages.,log1p version in model matrix.
+text_to_html_ratio,both,scraped,float,"Visible text bytes / raw HTML bytes; low values suggest markup-heavy, content-thin pages.",
+unique_dom_structures,site_features.csv,scraped,int,Number of distinct DOM tag-sequence hashes among crawled pages.,
+dom_structure_diversity,both,scraped,"float (0,1]","unique_dom_structures / pages_crawled; 1 = every page a distinct template, near 0 = one cloned template.",Nulled in model matrix when pages_crawled < min_pages_for_ratios.
+structure_hashes,site_features.csv,scraped,list of strings,SHA-1 hashes of each page's tag-name sequence (content ignored).,Input to cross-site similarity; drop before modeling.
+boilerplate_ratio,both,scraped,"float [0,1]",Share of landing-page 5-word shingles that recur on >=50% of crawled pages; high = repeated boilerplate text.,"Nulled in model matrix for tiny crawls. Counting-based, not NLP."
+avg_inline_styles_per_page,both,scraped,float,Mean count of elements with inline style= attributes per page; high values suggest page-builder output.,
+num_stylesheets_landing,both,scraped,int,External stylesheets linked on the landing page.,
+css_frameworks,site_features.csv,scraped,list of strings,"CSS frameworks detected (bootstrap, tailwind, foundation, bulma, materialize).",Counted as n_css_frameworks in model matrix.
+uses_css_framework,both,scraped,bool (0/1 in matrix),Whether any known CSS framework was detected.,Unmodified framework defaults suggest off-the-shelf templates.
+site_builders_detected,site_features.csv,scraped,list of strings,"Site builders detected (wix, squarespace, weebly, godaddy, wordpress).",Counted as n_site_builders in model matrix.
+uses_site_builder,both,scraped,bool (0/1 in matrix),"Whether a consumer site builder was detected, excluding WordPress alone (too common to be a signal).",Large universities rarely use consumer builders.
+css_content_hashes,site_features.csv,scraped,list of strings,SHA-1 hashes of up to CONFIG max_css_files_per_site fetched CSS files.,Input to n_sites_sharing_css_file; drop before modeling.
+meta_generators,site_features.csv,scraped,list of strings,Distinct <meta name=generator> values found across pages (CMS/builder identifiers).,Counted as n_meta_generators in model matrix.
+pct_pages_meta_description,both,scraped,"float [0,1]",Share of pages with a meta description tag.,
+pct_pages_og_tags,both,scraped,"float [0,1]",Share of pages with any Open Graph (og:) meta tags.,
+pct_pages_canonical,both,scraped,"float [0,1]",Share of pages declaring a canonical link.,
+has_favicon,both,scraped,bool (0/1 in matrix),Whether any crawled page declares a favicon.,
+has_edu_schema_markup,both,scraped,bool (0/1 in matrix),Whether schema.org CollegeOrUniversity / EducationalOrganization markup (JSON-LD or microdata) was found.,
+server_headers,site_features.csv,scraped,list of strings,Distinct HTTP Server header values observed.,Descriptive; not carried into model matrix.
+has_last_modified_header,both,scraped,bool (0/1 in matrix),Whether any response included a Last-Modified header.,
+ga_ua_ids,site_features.csv,scraped,list of strings,Universal Analytics IDs (UA-xxxx-x) found in page source.,Fraud networks reuse tracker IDs across sites; feeds n_sites_sharing_tracker_id.
+ga4_ids,site_features.csv,scraped,list of strings,Google Analytics 4 measurement IDs (G-xxxx) found in page source.,Feeds n_sites_sharing_tracker_id.
+gtm_ids,site_features.csv,scraped,list of strings,Google Tag Manager container IDs (GTM-xxxx) found in page source.,Feeds n_sites_sharing_tracker_id.
+fb_pixel_ids,site_features.csv,scraped,list of strings,"Facebook/Meta pixel IDs found via fbq('init', ...) calls.",Pixel presence suggests paid-ad recruitment funnels; feeds n_sites_sharing_tracker_id.
+pdf_link_count,site_features.csv,scraped,int,"Links ending in .pdf (catalogs, handbooks, forms); real institutions publish many.",log1p + per-page versions in model matrix.
+trusted_outbound_links,site_features.csv,scraped,int,"Outbound links to .gov domains or a whitelist of accreditors/education bodies (ed.gov, CHEA, regional accreditors, NCAA, ...).",log1p + per-page + share versions in model matrix.
+num_subdomains_seen,both,scraped,int,"Distinct same-domain hostnames observed in internal links (library., admissions., ...); real universities sprawl across subdomains.",
+mailto_count,site_features.csv,scraped,int,Total mailto: links found.,log1p version in model matrix.
+mailto_on_domain_ratio,both,scraped,"float [0,1]",Share of mailto addresses on the site's own domain (vs. gmail/other).,Null if no mailto links.
+free_email_hits,site_features.csv,scraped,int,"Occurrences of free-email domains (gmail, yahoo, hotmail, ...) in page source.",log1p version in model matrix.
+phone_number_hits,site_features.csv,scraped,int,US-format phone numbers matched in visible text.,log1p + per-page versions in model matrix.
+has_street_address,both,scraped,bool (0/1 in matrix),Whether a US street-address pattern AND a ZIP code appear in visible text.,
+max_copyright_year,site_features.csv,scraped,int or null,Most recent copyright year found in visible text.,Transformed to copyright_staleness_years.
+min_copyright_year,site_features.csv,scraped,int or null,Oldest copyright year found in visible text.,Used in copyright_year_span.
+broken_link_sample_n,site_features.csv,scraped,int,Number of unvisited internal links spot-checked for errors.,Denominator context for broken_link_rate_sampled.
+broken_link_rate_sampled,both,scraped,"float [0,1]",Share of the sampled internal links returning HTTP >=400 or failing.,"Sampled estimate, not a full-site rate."
+ssl_ok,both,scraped,bool (0/1 in matrix),Whether a TLS handshake on port 443 succeeded and a certificate was retrieved.,
+ssl_issuer_org,site_features.csv,scraped,string or null,"Certificate issuer organization (e.g., DigiCert vs. Let's Encrypt).",Descriptive; not carried into model matrix.
+ssl_org_validated,both,scraped,bool (0/1 in matrix),Whether the certificate subject carries an organizationName (OV/EV cert) vs. a domain-validated (DV) cert.,Institutions typically hold OV certs; mills use free DV.
+ssl_days_to_expiry,both,scraped,int,Days until the TLS certificate expires.,Short-lived certs (~90 days) usually indicate free DV issuance.
+domain_age_days,site_features.csv,scraped,int or null,Days since WHOIS domain creation date. Requires python-whois.,Converted to domain_age_years.
+whois_privacy_protected,both,scraped,bool (0/1 in matrix) or null,Whether WHOIS registrant details are privacy-proxied/redacted. Requires python-whois.,Missingness itself is informative (see *_missing).
+whois_registrant_org,site_features.csv,scraped,string or null,"WHOIS registrant organization name, if disclosed.",Descriptive; compare against institution name manually.
+max_structure_similarity_other_site,both,cross-site,"float [0,1]",Maximum Jaccard similarity between this site's DOM template hashes and any other site in the crawled list.,Template-cloning signal; recompute if the URL list changes.
+n_sites_sharing_css_file,both,cross-site,int,Number of other sites in the list sharing at least one identical CSS file (by content hash).,Fraud-network clustering signal.
+n_sites_sharing_tracker_id,both,cross-site,int,Number of other sites in the list sharing at least one GA/GA4/GTM/FB-pixel ID.,Strong fraud-network clustering signal.
+crawl_failed,model_matrix.csv,engineered,int (0/1),"1 if the site could not be crawled (crawl_error non-null); failed rows are kept, not dropped.",Check label confounding: dead sites may correlate with shut-down mills.
+pages_hit_cap,model_matrix.csv,engineered,int (0/1),1 if pages_crawled reached the per-site cap; distinguishes 'site is small' from 'crawl was truncated'.,
+is_edu_tld,model_matrix.csv,engineered,int (0/1),1 if TLD is .edu (requires accreditation to register).,Likely the single strongest prior for US institutions.
+is_gov_or_state_tld,model_matrix.csv,engineered,int (0/1),1 if TLD ends in gov or us.,
+is_org_tld,model_matrix.csv,engineered,int (0/1),1 if TLD is .org.,
+is_com_net_tld,model_matrix.csv,engineered,int (0/1),1 if TLD is .com or .net.,
+is_foreign_or_other_tld,model_matrix.csv,engineered,int (0/1),"1 if TLD is none of the above categories (country codes, .education, etc.).",
+domain_age_years,model_matrix.csv,engineered,float,domain_age_days / 365.25.,Median-imputed with a _missing indicator when WHOIS fails.
+copyright_staleness_years,model_matrix.csv,engineered,float >=0,Current year minus max_copyright_year; abandoned or unmaintained sites score high.,
+copyright_year_span,model_matrix.csv,engineered,float,max_copyright_year minus min_copyright_year; long spans suggest sustained history.,
+n_css_frameworks,model_matrix.csv,engineered,int,Count of distinct CSS frameworks detected.,
+n_site_builders,model_matrix.csv,engineered,int,Count of distinct site builders detected.,
+n_meta_generators,model_matrix.csv,engineered,int,Count of distinct meta generator values.,
+n_css_files_hashed,model_matrix.csv,engineered,int,Number of CSS files successfully fetched and hashed.,Also a coverage indicator for the CSS-sharing feature.
+n_tracker_ids,model_matrix.csv,engineered,int,Total distinct tracker IDs (GA UA + GA4 + GTM + FB pixel).,
+has_any_analytics,model_matrix.csv,engineered,int (0/1),1 if any tracker ID was found.,
+has_fb_pixel,model_matrix.csv,engineered,int (0/1),1 if a Facebook/Meta pixel was found.,Ad-funnel recruitment signal.
+pdf_links_per_page,model_matrix.csv,engineered,float,pdf_link_count / pages_crawled (size-normalized).,
+trusted_links_per_page,model_matrix.csv,engineered,float,trusted_outbound_links / pages_crawled (size-normalized).,
+external_links_per_page,model_matrix.csv,engineered,float,total_external_links / pages_crawled (size-normalized).,
+internal_links_per_page,model_matrix.csv,engineered,float,total_internal_links / pages_crawled (size-normalized).,
+phone_hits_per_page,model_matrix.csv,engineered,float,phone_number_hits / pages_crawled (size-normalized).,
+external_link_share,model_matrix.csv,engineered,"float [0,1]",External links / (external + internal links).,
+trusted_share_of_external,model_matrix.csv,engineered,"float [0,1]",Trusted outbound links / total external links; separates 'links out a lot' from 'links out to accreditors'.,
+log1p_total_a_tags,model_matrix.csv,engineered,float,log(1 + total_a_tags); tames heavy-tailed volume counts.,
+log1p_total_internal_links,model_matrix.csv,engineered,float,log(1 + total_internal_links).,
+log1p_total_external_links,model_matrix.csv,engineered,float,log(1 + total_external_links).,
+log1p_total_words,model_matrix.csv,engineered,float,log(1 + total_words).,
+log1p_total_images,model_matrix.csv,engineered,float,log(1 + total_images).,
+log1p_total_html_bytes,model_matrix.csv,engineered,float,log(1 + total_html_bytes).,
+log1p_pdf_link_count,model_matrix.csv,engineered,float,log(1 + pdf_link_count).,
+log1p_trusted_outbound_links,model_matrix.csv,engineered,float,log(1 + trusted_outbound_links).,
+log1p_mailto_count,model_matrix.csv,engineered,float,log(1 + mailto_count).,
+log1p_free_email_hits,model_matrix.csv,engineered,float,log(1 + free_email_hits).,
+log1p_phone_number_hits,model_matrix.csv,engineered,float,log(1 + phone_number_hits).,
+{feature}_missing,model_matrix.csv,engineered,int (0/1),"PATTERN: for every feature with missing values, a paired indicator equal to 1 where the value was null before median imputation. Exact set of indicator columns depends on the data.","Keeps missingness (failed WHOIS/SSL, tiny crawls, failed crawls) available as signal instead of hiding it behind imputation."
