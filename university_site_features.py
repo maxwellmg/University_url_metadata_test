@@ -71,7 +71,7 @@ CONFIG = {
     "user_agent": (
         "UniversityStructureResearchBot/1.0 "
         "(academic research on institutional website structure; "
-        "contact: mm9628a@american.edu)"
+        "contact: <university email>.edu)"
     ),
     "checkpoint_path": "site_features_checkpoint.json",
     "output_csv": "site_features.csv",
