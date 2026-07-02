@@ -48,9 +48,10 @@ LIST_COLUMNS = [
     "structure_hashes", "css_content_hashes", "css_frameworks",
     "site_builders_detected", "meta_generators", "server_headers",
     "ga_ua_ids", "ga4_ids", "gtm_ids", "fb_pixel_ids",
+    "sitemap_expected_sections",
 ]
 
-ID_COLUMNS = ["input_url", "registered_domain"]
+ID_COLUMNS = ["OPE6_ID", "university_website", "input_url", "registered_domain"]
 
 # Raw numeric features carried through as-is (imputed if missing)
 PASSTHROUGH_NUMERIC = [
@@ -63,6 +64,11 @@ PASSTHROUGH_NUMERIC = [
     "ssl_days_to_expiry", "landing_status_code",
     "max_structure_similarity_other_site",
     "n_sites_sharing_css_file", "n_sites_sharing_tracker_id",
+    # sitemap / URL-inventory module
+    "sitemap_max_depth", "sitemap_avg_depth", "sitemap_n_top_dirs",
+    "sitemap_pct_query_urls", "sitemap_expected_section_count",
+    "sitemap_pct_urls_with_lastmod", "sitemap_days_since_last_update",
+    "sitemap_lastmod_span_days", "sitemap_files_fetched",
 ]
 
 # Heavy-tailed volume counts -> log1p
@@ -71,6 +77,7 @@ LOG_COLUMNS = [
     "total_words", "total_images", "total_html_bytes",
     "pdf_link_count", "trusted_outbound_links", "mailto_count",
     "free_email_hits", "phone_number_hits",
+    "sitemap_url_count", "sitemap_pdf_count",
 ]
 
 BOOL_COLUMNS = [
@@ -78,6 +85,7 @@ BOOL_COLUMNS = [
     "has_last_modified_header", "has_street_address",
     "uses_css_framework", "uses_site_builder",
     "ssl_ok", "ssl_org_validated", "whois_privacy_protected",
+    "sitemap_found", "sitemap_truncated", "crawl_censored",
 ]
 
 
@@ -212,6 +220,12 @@ def build_model_matrix(
         X["trusted_share_of_external"] = (
             pd.to_numeric(df["trusted_outbound_links"], errors="coerce") / ext.replace(0, np.nan)
         )
+
+    # crawl coverage: share of the site (per sitemap census) the capped crawl saw;
+    # near 1 for tiny sites, near 0 for real universities — an uncensored size signal
+    if "sitemap_url_count" in df.columns:
+        sm = pd.to_numeric(df["sitemap_url_count"], errors="coerce").replace(0, np.nan)
+        X["crawl_coverage_ratio"] = (pages / sm).clip(upper=1.0)
 
     # -- 6. log-scaled volumes ----------------------------------------------------
     for col in LOG_COLUMNS:

@@ -71,10 +71,15 @@ CONFIG = {
     "user_agent": (
         "UniversityStructureResearchBot/1.0 "
         "(academic research on institutional website structure; "
-        "contact: <university url>)"
+        "contact: mm9628a@american.edu)"
     ),
     "checkpoint_path": "site_features_checkpoint.json",
     "output_csv": "site_features.csv",
+    # --- sitemap / URL-inventory module ---
+    "collect_sitemap": True,          # fetch sitemap.xml and derive inventory features
+    "max_sitemap_files": 10,          # sub-sitemaps fetched per site (index files recurse)
+    "max_sitemap_urls": 50_000,       # stop collecting URLs past this (sets sitemap_truncated)
+    "save_url_inventory_dir": None,   # e.g. "url_inventories/" to save each site's URL list (.txt.gz)
 }
 
 # Domains treated as legitimacy-signaling outbound links
@@ -313,9 +318,139 @@ def extract_page_features(html: str, page_url: str, site_domain: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Polite crawler
+# Sitemap / URL-inventory module
 # ---------------------------------------------------------------------------
-class PoliteSession:
+RE_SITEMAP_DIRECTIVE = re.compile(r"(?im)^\s*sitemap:\s*(\S+)")
+RE_SM_LOC = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.I | re.S)
+RE_SM_LASTMOD = re.compile(r"<lastmod>\s*(.*?)\s*</lastmod>", re.I | re.S)
+
+# Path substrings signalling real institutional anatomy
+EXPECTED_SECTIONS = [
+    "admission", "registrar", "faculty", "catalog", "financial",
+    "library", "research", "athletic", "alumni", "tuition",
+]
+
+
+def parse_sitemap_document(doc: str) -> tuple[list, list, bool]:
+    """Return (loc URLs, lastmod strings, is_index) from sitemap XML text."""
+    locs = RE_SM_LOC.findall(doc)
+    lastmods = RE_SM_LASTMOD.findall(doc)
+    is_index = "<sitemapindex" in doc.lower()
+    return locs, lastmods, is_index
+
+
+def _fetch_sitemap_doc(url: str, sess: PoliteSession):
+    try:
+        r = sess.get(url)
+        if r.status_code != 200:
+            return None
+        content = r.content
+        if url.lower().endswith(".gz") or content[:2] == b"\x1f\x8b":
+            import gzip
+            content = gzip.decompress(content)
+        return content.decode("utf-8", errors="ignore")
+    except Exception:
+        return None
+
+
+def collect_sitemap_inventory(base_url: str, robots_text: str, sess: PoliteSession) -> tuple[list, list, dict]:
+    """
+    Discover sitemaps (robots.txt Sitemap: directives, else default paths),
+    recurse through index files, and return (urls, lastmods, meta).
+    A handful of extra requests per site — pages are never fetched.
+    """
+    meta = {"sitemap_found": False, "sitemap_source": None,
+            "sitemap_files_fetched": 0, "sitemap_truncated": False}
+    candidates = RE_SITEMAP_DIRECTIVE.findall(robots_text)
+    source = "robots" if candidates else "default_path"
+    if not candidates:
+        candidates = [urljoin(base_url, "/sitemap.xml"),
+                      urljoin(base_url, "/sitemap_index.xml")]
+
+    urls, lastmods = [], []
+    queue, seen = deque(candidates), set()
+    while queue and meta["sitemap_files_fetched"] < CONFIG["max_sitemap_files"] \
+            and len(urls) < CONFIG["max_sitemap_urls"]:
+        sm_url = queue.popleft()
+        if sm_url in seen:
+            continue
+        seen.add(sm_url)
+        doc = _fetch_sitemap_doc(sm_url, sess)
+        meta["sitemap_files_fetched"] += 1
+        if not doc:
+            continue
+        locs, mods, is_index = parse_sitemap_document(doc)
+        if not locs:
+            continue
+        meta["sitemap_found"] = True
+        meta["sitemap_source"] = source
+        if is_index:
+            queue.extend(locs)          # locs are sub-sitemap URLs
+        else:
+            urls.extend(locs)
+            lastmods.extend(mods)       # only page-level lastmods, not index-level
+
+    if len(urls) > CONFIG["max_sitemap_urls"]:
+        urls = urls[: CONFIG["max_sitemap_urls"]]
+        meta["sitemap_truncated"] = True
+    if queue and meta["sitemap_files_fetched"] >= CONFIG["max_sitemap_files"]:
+        meta["sitemap_truncated"] = True
+    return urls, lastmods, meta
+
+
+def sitemap_features_from_urls(urls: list, lastmods: list, site_domain: str) -> dict:
+    """Derive inventory features from the URL list alone (no page fetches)."""
+    same = [u for u in urls if registered_domain(u) == site_domain]
+    out = {"sitemap_url_count": len(same)}
+    if not same:
+        return out
+
+    paths = [urlparse(u).path for u in same]
+    depths = [len([seg for seg in p.split("/") if seg]) for p in paths]
+    top_dirs = {p.split("/")[1].lower() for p in paths
+                if len(p.split("/")) > 1 and p.split("/")[1]}
+    lowered = [u.lower() for u in same]
+
+    out.update({
+        "sitemap_max_depth": max(depths),
+        "sitemap_avg_depth": sum(depths) / len(depths),
+        "sitemap_n_top_dirs": len(top_dirs),
+        "sitemap_pct_query_urls": sum("?" in u for u in same) / len(same),
+        "sitemap_pdf_count": sum(u.split("?")[0].endswith(".pdf") for u in lowered),
+        "sitemap_expected_sections": sorted(
+            {s for s in EXPECTED_SECTIONS if any(s in u for u in lowered)}
+        ),
+    })
+    out["sitemap_expected_section_count"] = len(out["sitemap_expected_sections"])
+
+    # lastmod -> maintenance cadence
+    dates = []
+    for m in lastmods:
+        try:
+            dates.append(datetime.strptime(m.strip()[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc))
+        except ValueError:
+            continue
+    out["sitemap_pct_urls_with_lastmod"] = len(dates) / len(same)
+    if dates:
+        now = datetime.now(timezone.utc)
+        out["sitemap_days_since_last_update"] = (now - max(dates)).days
+        out["sitemap_lastmod_span_days"] = (max(dates) - min(dates)).days
+    return out
+
+
+def _save_url_inventory(site_domain: str, urls: list) -> None:
+    """Optionally persist the discrete URL list per site (gzipped, one URL/line)."""
+    out_dir = CONFIG.get("save_url_inventory_dir")
+    if not out_dir or not urls:
+        return
+    import gzip
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    fp = Path(out_dir) / f"{site_domain.replace('.', '_')}.txt.gz"
+    with gzip.open(fp, "wt", encoding="utf-8") as f:
+        f.write("\n".join(urls))
+
+
+
     def __init__(self, delay: float):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": CONFIG["user_agent"]})
@@ -340,18 +475,17 @@ class PoliteSession:
 
 
 def load_robots(base_url: str, sess: PoliteSession):
+    """Fetch robots.txt; return (parser, raw_text) — the text carries Sitemap: directives."""
     rp = robotparser.RobotFileParser()
-    robots_url = urljoin(base_url, "/robots.txt")
+    robots_text = ""
     try:
-        resp = sess.get(robots_url)
+        resp = sess.get(urljoin(base_url, "/robots.txt"))
         if resp.status_code == 200:
-            rp.parse(resp.text.splitlines())
-        else:
-            rp.parse([])  # no robots.txt -> everything allowed
+            robots_text = resp.text
     except Exception:
-        rp.parse([])
-    return rp
-
+        pass
+    rp.parse(robots_text.splitlines())
+    return rp, robots_text
 
 def crawl_site(start_url: str) -> dict:
     """Crawl one site (BFS, capped) and return aggregated features."""
@@ -368,7 +502,7 @@ def crawl_site(start_url: str) -> dict:
     }
 
     sess = PoliteSession(CONFIG["request_delay_sec"])
-    rp = load_robots(start_url, sess)
+    rp, robots_text = load_robots(start_url, sess)
     crawl_delay = rp.crawl_delay(CONFIG["user_agent"])
     if crawl_delay:
         sess.delay = max(sess.delay, float(crawl_delay))
@@ -451,6 +585,21 @@ def crawl_site(start_url: str) -> dict:
         except Exception:
             continue
     result["css_content_hashes"] = css_hashes
+
+    # Sitemap / URL inventory (a few extra requests; no page fetches)
+    if CONFIG.get("collect_sitemap", True):
+        try:
+            sm_urls, sm_lastmods, sm_meta = collect_sitemap_inventory(start_url, robots_text, sess)
+            result.update(sm_meta)
+            result.update(sitemap_features_from_urls(sm_urls, sm_lastmods, site_domain))
+            _save_url_inventory(site_domain, sm_urls)
+        except Exception:
+            result["sitemap_found"] = False
+        # crawl truncated by the page cap while the site is actually larger
+        result["crawl_censored"] = bool(
+            len(pages) >= CONFIG["max_pages_per_site"]
+            and result.get("sitemap_url_count", 0) > CONFIG["max_pages_per_site"]
+        )
 
     # Domain-level lookups
     result.update(ssl_features(hostname))
@@ -577,36 +726,65 @@ def _sanitize_for_json(d: dict) -> dict:
     return json.loads(json.dumps(d, default=_json_default))
 
 
+# ---------------------------------------------------------------------------
+# INPUT SECTION: read the Excel file into a pandas DataFrame and keep the
+# two columns that flow through to the final output:
+#   * OPE6_ID            — your unique institution key (join key for labels)
+#   * university_website — the URL to crawl
+# ---------------------------------------------------------------------------
+def load_university_urls(
+    excel_path: str,
+    url_column: str = "university_website",
+    id_column: str = "OPE6_ID",
+) -> pd.DataFrame:
+    """Read the input Excel and return [id_column, url_column, normalized_url]."""
+    # dtype=str on the ID column preserves leading zeros (OPE6 IDs like "001234")
+    input_df = pd.read_excel(excel_path, dtype={id_column: str})
+    missing = [c for c in (id_column, url_column) if c not in input_df.columns]
+    if missing:
+        raise KeyError(
+            f"Column(s) {missing} not found in {excel_path}. "
+            f"Available: {list(input_df.columns)}"
+        )
+    out = input_df[[id_column, url_column]].copy()
+    out = out.dropna(subset=[url_column])
+    out["normalized_url"] = out[url_column].astype(str).map(normalize_url)
+    n_dupes = out["normalized_url"].duplicated().sum()
+    if n_dupes:
+        print(f"note: {n_dupes} rows share a URL with another OPE6_ID; "
+              "each URL is crawled once and features are joined back to every row.")
+    return out
+
+
 def build_feature_dataframe(
     excel_path: str,
-    url_column: str = "url",
+    url_column: str = "university_website",
+    id_column: str = "OPE6_ID",
     checkpoint_path: str | None = None,
     output_csv: str | None = None,
     limit: int | None = None,
 ) -> pd.DataFrame:
     """
-    Read URLs from an Excel file, crawl each site, and return a feature DataFrame.
+    Read institutions from an Excel file, crawl each unique website once, and
+    return a DataFrame of [OPE6_ID, university_website, <features...>].
     Resumes automatically from the checkpoint file if interrupted.
     """
     checkpoint_path = checkpoint_path or CONFIG["checkpoint_path"]
     output_csv = output_csv or CONFIG["output_csv"]
 
-    urls_df = pd.read_excel(excel_path)
-    if url_column not in urls_df.columns:
-        raise KeyError(
-            f"Column '{url_column}' not found. Available: {list(urls_df.columns)}"
-        )
-    urls = [normalize_url(u) for u in urls_df[url_column].dropna().astype(str)]
+    input_df = load_university_urls(excel_path, url_column=url_column, id_column=id_column)
+    unique_urls = input_df["normalized_url"].drop_duplicates().tolist()
     if limit:
-        urls = urls[:limit]
+        unique_urls = unique_urls[:limit]
 
     done = _load_checkpoint(checkpoint_path)
-    print(f"{len(urls)} URLs | {len(done)} already in checkpoint")
+    print(f"{len(input_df)} input rows | {len(unique_urls)} unique URLs to crawl | "
+          f"{len(done)} already in checkpoint")
 
-    for i, url in enumerate(urls, 1):
+    for i, url in enumerate(unique_urls, 1):
         if url in done:
             continue
-        print(f"[{i}/{len(urls)}] crawling {url}")
+        print(f"[{i}/{len(unique_urls)}] crawling {url}")
         try:
             feats = crawl_site(url)
         except Exception as e:
@@ -614,8 +792,16 @@ def build_feature_dataframe(
         done[url] = _sanitize_for_json(feats)
         _save_checkpoint(checkpoint_path, done)
 
-    df = pd.DataFrame(list(done.values()))
-    df = add_cross_site_features(df)
+    feats_df = pd.DataFrame(list(done.values()))
+    feats_df = add_cross_site_features(feats_df)
+
+    # Join features back onto the input rows so OPE6_ID and the original
+    # website string are the leading columns of the final DataFrame.
+    df = input_df.merge(feats_df, left_on="normalized_url", right_on="input_url", how="left")
+    if limit:
+        df = df[df["input_url"].notna()].reset_index(drop=True)
+    df = df.drop(columns=["normalized_url"])
+
     df.to_csv(output_csv, index=False)
     print(f"Saved {len(df)} rows -> {output_csv}")
     return df
@@ -669,12 +855,15 @@ def add_cross_site_features(df: pd.DataFrame) -> pd.DataFrame:
 # CLI
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    # Command-line interface only — ignored when importing in Jupyter.
     ap = argparse.ArgumentParser(description="Extract structural website features for fraud modeling.")
-    ap.add_argument("excel_path", help="Excel file containing university URLs")
-    ap.add_argument("--url-column", default="url")
+    ap.add_argument("excel_path", help="Excel file with OPE6_ID and university_website columns")
+    ap.add_argument("--url-column", default="university_website")
+    ap.add_argument("--id-column", default="OPE6_ID")
     ap.add_argument("--limit", type=int, default=None, help="only process first N URLs (for testing)")
     ap.add_argument("--max-pages", type=int, default=None)
     args = ap.parse_args()
     if args.max_pages:
         CONFIG["max_pages_per_site"] = args.max_pages
-    build_feature_dataframe(args.excel_path, url_column=args.url_column, limit=args.limit)
+    build_feature_dataframe(args.excel_path, url_column=args.url_column,
+                            id_column=args.id_column, limit=args.limit)

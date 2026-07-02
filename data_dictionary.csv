@@ -99,3 +99,24 @@ log1p_mailto_count,model_matrix.csv,engineered,float,log(1 + mailto_count).,
 log1p_free_email_hits,model_matrix.csv,engineered,float,log(1 + free_email_hits).,
 log1p_phone_number_hits,model_matrix.csv,engineered,float,log(1 + phone_number_hits).,
 {feature}_missing,model_matrix.csv,engineered,int (0/1),"PATTERN: for every feature with missing values, a paired indicator equal to 1 where the value was null before median imputation. Exact set of indicator columns depends on the data.","Keeps missingness (failed WHOIS/SSL, tiny crawls, failed crawls) available as signal instead of hiding it behind imputation."
+OPE6_ID,both,identifier,string,Institution's 6-digit OPE ID carried through from the input Excel; unique key for joining labels and Scorecard/SEVIS data.,ID column; drop before modeling. Read as string to preserve leading zeros.
+university_website,both,identifier,string,Original website string from the input Excel (pre-normalization).,ID column; drop before modeling.
+sitemap_found,both,scraped,bool (0/1 in matrix),"Whether a parseable sitemap was discovered via robots.txt Sitemap: directives or default paths (/sitemap.xml, /sitemap_index.xml).",Absence is itself a signal; institutions with web teams publish sitemaps.
+sitemap_source,site_features.csv,scraped,string or null,How the sitemap was discovered: 'robots' or 'default_path'.,Descriptive; not carried into model matrix.
+sitemap_files_fetched,both,scraped,int,"Number of sitemap files requested (index files recurse into sub-sitemaps, capped by CONFIG max_sitemap_files).",
+sitemap_truncated,both,scraped,bool (0/1 in matrix),Whether collection stopped at the file or URL cap; sitemap_url_count is a lower bound when 1.,
+sitemap_url_count,site_features.csv,scraped,int,"Same-domain URLs listed in the sitemap — an uncensored census of true site size, independent of the crawl page cap.",log1p version in model matrix; likely the highest-value sitemap feature.
+sitemap_max_depth,both,scraped,int,Maximum URL path depth (path segments) across sitemap URLs.,Real sites are deep trees; mills are flat.
+sitemap_avg_depth,both,scraped,float,Mean URL path depth across sitemap URLs.,
+sitemap_n_top_dirs,both,scraped,int,Distinct first-level path directories in the sitemap (organizational breadth).,
+sitemap_pct_query_urls,both,scraped,"float [0,1]",Share of sitemap URLs containing a query string.,
+sitemap_pdf_count,site_features.csv,scraped,int,"Site-wide count of .pdf URLs in the sitemap (vs. pdf_link_count, which only sees the crawled front pages).",log1p version in model matrix.
+sitemap_expected_sections,site_features.csv,scraped,list of strings,"Institutional-anatomy path substrings found among sitemap URLs (admission, registrar, faculty, catalog, financial, library, research, athletic, alumni, tuition).",Counted as sitemap_expected_section_count.
+sitemap_expected_section_count,both,scraped,int (0-10),Number of distinct expected institutional sections present in sitemap URL paths.,"Strong, interpretable legitimacy signal."
+sitemap_pct_urls_with_lastmod,both,scraped,"float [0,1]",Share of sitemap URLs carrying a parseable lastmod date.,
+sitemap_days_since_last_update,both,scraped,int or null,Days since the most recent sitemap lastmod date; maintenance-cadence signal.,High values flag abandoned-but-online sites; null if no lastmod dates.
+sitemap_lastmod_span_days,both,scraped,int or null,Days between oldest and newest lastmod dates; long spans indicate sustained site history.,
+crawl_censored,both,scraped,bool (0/1 in matrix),"1 if the crawl hit the page cap AND the sitemap census shows the site is larger than the cap — i.e., volume features are truncated for this site.",Use to interpret size features honestly.
+crawl_coverage_ratio,model_matrix.csv,engineered,"float (0,1]","pages_crawled / sitemap_url_count, capped at 1; share of the site the capped crawl actually saw. Near 1 for tiny sites, near 0 for real universities.","Inverse, uncensored size signal; null (imputed+flagged) when no sitemap."
+log1p_sitemap_url_count,model_matrix.csv,engineered,float,log(1 + sitemap_url_count); uncensored site size on a tame scale.,Restores the size axis the 25-page crawl cap censors.
+log1p_sitemap_pdf_count,model_matrix.csv,engineered,float,log(1 + sitemap_pdf_count).,

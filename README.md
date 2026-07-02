@@ -40,7 +40,10 @@ from university_site_features import build_feature_dataframe, CONFIG
 from site_feature_engineering import build_model_matrix, summarize
 
 # Step 1: crawl (start small to sanity-check)
-df = build_feature_dataframe("university_urls.xlsx", url_column="url", limit=5)
+df = build_feature_dataframe("university_urls.xlsx",
+                             url_column="university_website",
+                             id_column="OPE6_ID",
+                             limit=5)
 
 # Step 2: engineer features — accepts the DataFrame directly or the saved CSV
 X, report = build_model_matrix(df)
@@ -52,12 +55,16 @@ X_model = X.drop(columns=["input_url", "registered_domain"])
 **Command line:**
 
 ```bash
-python university_site_features.py university_urls.xlsx --url-column url --limit 5
+python university_site_features.py university_urls.xlsx --limit 5
 python site_feature_engineering.py site_features.csv --output model_matrix.csv
 ```
 
-The Excel file needs one column of URLs (default column name `url`; scheme
-optional — `www.example.edu` is fine).
+The Excel file needs an institution key column and a URL column (defaults:
+`OPE6_ID` and `university_website`; scheme optional — `www.example.edu` is
+fine). `OPE6_ID` is read as a string to preserve leading zeros and is carried
+through both output files as the join key for labels and Scorecard/SEVIS data.
+Duplicate URLs are crawled once and their features joined back to every
+matching input row.
 
 ## Script 1: `university_site_features.py`
 
@@ -72,6 +79,14 @@ features in six groups:
 | Tracking | Google Analytics (UA + GA4), GTM, and Facebook pixel IDs |
 | Legitimacy signals | PDF link count, outbound links to `.gov`/accreditors, subdomain count, on-domain vs. free-email addresses, phone/street-address presence, copyright-year staleness, sampled broken-link rate |
 | Domain-level | TLD, HTTPS redirect, SSL issuer & DV-vs-OV validation, domain age, WHOIS privacy protection |
+| Sitemap / URL inventory | true site-wide page count (uncensored by the crawl cap), path depth & breadth, expected institutional sections (admissions, registrar, faculty, ...), site-wide PDF count, lastmod maintenance cadence, `crawl_censored` flag |
+
+The sitemap module discovers sitemaps via robots.txt `Sitemap:` directives or
+default paths, recurses through index files (capped), and derives features
+from the URL list alone — no page fetches. Set
+`CONFIG["save_url_inventory_dir"]` to also save each site's discrete URL list
+as a gzipped text file, and `CONFIG["collect_sitemap"] = False` to disable the
+module entirely.
 
 After all sites finish, three **cross-site** features are computed over the
 whole list — the fraud-network clustering signals:
@@ -94,7 +109,8 @@ whole list — the fraud-network clustering signals:
 Edit the `CONFIG` dict at the top of the script (or mutate it in the notebook
 before calling): `max_pages_per_site`, `request_delay_sec`,
 `request_timeout_sec`, `broken_link_sample_size`, `checkpoint_path`,
-`output_csv`, `user_agent`.
+`output_csv`, `user_agent`, `collect_sitemap`, `max_sitemap_files`,
+`max_sitemap_urls`, `save_url_inventory_dir`.
 
 **Runtime budget:** ~45–60 s per site at default settings. For hundreds of
 URLs, run it in a terminal/`nohup` session rather than a notebook cell, or
@@ -106,7 +122,9 @@ Transforms the raw output into a numeric matrix:
 
 - **Derived features** — TLD dummy flags (`is_edu_tld`, etc.), domain age in
   years, copyright staleness, tracker counts, per-page rates (PDFs/page,
-  trusted links/page), external-link share, trusted-share-of-external
+  trusted links/page), external-link share, trusted-share-of-external, and
+  `crawl_coverage_ratio` (pages crawled / sitemap census — an uncensored
+  size signal)
 - **Transforms** — `log1p` on heavy-tailed volume counts; booleans → 0/1
 - **Missingness as signal** — every imputed column gets a paired `*_missing`
   indicator before median imputation (failed WHOIS/SSL lookups are themselves
@@ -144,6 +162,7 @@ standardize inside your cross-validation pipeline to avoid leakage.
 | `university_site_features.py` | Polite crawler + raw feature extraction |
 | `site_feature_engineering.py` | Raw features → model-ready matrix |
 | `requirements.txt` | Dependencies |
+| `data_dictionary.csv` | Description of every scraped and engineered variable |
 | `site_features_checkpoint.json` | Auto-generated resume state (safe to delete to force a fresh crawl) |
 | `site_features.csv` | Raw per-site features |
 | `model_matrix.csv` | Final numeric matrix |
