@@ -454,7 +454,10 @@ def _save_url_inventory(site_domain: str, urls: list) -> None:
         f.write("\n".join(urls))
 
 
-
+# ---------------------------------------------------------------------------
+# Polite HTTP session (rate-limited, user-agent, timeout enforcement)
+# ---------------------------------------------------------------------------
+class PoliteSession:
     def __init__(self, delay: float):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": CONFIG["user_agent"]})
