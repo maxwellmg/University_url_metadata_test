@@ -99,8 +99,8 @@ log1p_mailto_count,model_matrix.csv,engineered,float,log(1 + mailto_count).,
 log1p_free_email_hits,model_matrix.csv,engineered,float,log(1 + free_email_hits).,
 log1p_phone_number_hits,model_matrix.csv,engineered,float,log(1 + phone_number_hits).,
 {feature}_missing,model_matrix.csv,engineered,int (0/1),"PATTERN: for every feature with missing values, a paired indicator equal to 1 where the value was null before median imputation. Exact set of indicator columns depends on the data.","Keeps missingness (failed WHOIS/SSL, tiny crawls, failed crawls) available as signal instead of hiding it behind imputation."
-OPE6_ID,both,identifier,string,Institution's 6-digit OPE ID carried through from the input Excel; unique key for joining labels and Scorecard/SEVIS data.,ID column; drop before modeling. Read as string to preserve leading zeros.
-university_website,both,identifier,string,Original website string from the input Excel (pre-normalization).,ID column; drop before modeling.
+UNITID,both,identifier,string,Institution identifier carried through from the input CSV; unique key for joining labels and Scorecard/SEVIS data.,ID column; drop before modeling. Read as string to preserve leading zeros when needed.
+school.school_url,both,identifier,string,Original website string from the input CSV (pre-normalization).,ID column; drop before modeling.
 sitemap_found,both,scraped,bool (0/1 in matrix),"Whether a parseable sitemap was discovered via robots.txt Sitemap: directives or default paths (/sitemap.xml, /sitemap_index.xml).",Absence is itself a signal; institutions with web teams publish sitemaps.
 sitemap_source,site_features.csv,scraped,string or null,How the sitemap was discovered: 'robots' or 'default_path'.,Descriptive; not carried into model matrix.
 sitemap_files_fetched,both,scraped,int,"Number of sitemap files requested (index files recurse into sub-sitemaps, capped by CONFIG max_sitemap_files).",

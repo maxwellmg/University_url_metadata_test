@@ -7,7 +7,7 @@ fingerprints (thin sites, cloned templates, shared trackers, missing
 legitimacy signals) that can be measured without reading a word of content.
 
 ```
-university_urls.xlsx
+university_urls.csv
         │
         ▼
 university_site_features.py     (polite crawler + raw feature extraction)
@@ -40,9 +40,9 @@ from university_site_features import build_feature_dataframe, CONFIG
 from site_feature_engineering import build_model_matrix, summarize
 
 # Step 1: crawl (start small to sanity-check)
-df = build_feature_dataframe("university_urls.xlsx",
-                             url_column="university_website",
-                             id_column="OPE6_ID",
+df = build_feature_dataframe("university_urls.csv",
+                             url_column="school.school_url",
+                             id_column="UNITID",
                              limit=5)
 
 # Step 2: engineer features — accepts the DataFrame directly or the saved CSV
@@ -55,13 +55,13 @@ X_model = X.drop(columns=["input_url", "registered_domain"])
 **Command line:**
 
 ```bash
-python university_site_features.py university_urls.xlsx --limit 5
+python university_site_features.py university_urls.csv --limit 5
 python site_feature_engineering.py site_features.csv --output model_matrix.csv
 ```
 
-The Excel file needs an institution key column and a URL column (defaults:
-`OPE6_ID` and `university_website`; scheme optional — `www.example.edu` is
-fine). `OPE6_ID` is read as a string to preserve leading zeros and is carried
+The CSV file needs an institution key column and a URL column (defaults:
+`UNITID` and `school.school_url`; scheme optional — `www.example.edu` is
+fine). `UNITID` is read as a string to preserve leading zeros and is carried
 through both output files as the join key for labels and Scorecard/SEVIS data.
 Duplicate URLs are crawled once and their features joined back to every
 matching input row.

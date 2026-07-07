@@ -4,7 +4,6 @@ beautifulsoup4>=4.11
 lxml>=4.9
 pandas>=1.5
 numpy>=1.23
-openpyxl>=3.1          # pandas Excel reading (.xlsx input)
 
 # Optional but recommended — scripts degrade gracefully without them
 tldextract>=3.4        # correct registered-domain parsing for multi-part TLDs (.ac.uk, .edu.pk)

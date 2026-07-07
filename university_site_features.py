@@ -7,11 +7,11 @@ Crawl a list of university websites and extract structural / metadata features
 Designed to run in a Jupyter notebook:
 
     from university_site_features import build_feature_dataframe
-    df = build_feature_dataframe("university_urls.xlsx", url_column="url")
+    df = build_feature_dataframe("university_urls.csv", url_column="school.school_url")
 
 Or from the command line:
 
-    python university_site_features.py university_urls.xlsx --url-column url
+    python university_site_features.py university_urls.csv --url-column school.school_url
 
 Responsible crawling built in:
   * respects robots.txt (skips disallowed paths; honors Crawl-delay)
@@ -21,7 +21,7 @@ Responsible crawling built in:
   * checkpoints per-site results to JSON so interrupted runs resume
 
 Dependencies (pip install):
-  required: requests beautifulsoup4 pandas lxml openpyxl
+  required: requests beautifulsoup4 pandas lxml
   optional: tldextract python-whois   (features degrade gracefully if absent)
 """
 
@@ -172,7 +172,7 @@ def text_shingles(text: str, k: int = 5) -> set:
 # ---------------------------------------------------------------------------
 def ssl_features(hostname: str, timeout: int = 10) -> dict:
     out = {"ssl_ok": False, "ssl_issuer_org": None, "ssl_org_validated": None,
-           "ssl_days_to_expiry": None}
+           "ssl_days_to_expiry": None, "ssl_cert_error": None}
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((hostname, 443), timeout=timeout) as sock:
@@ -188,6 +188,10 @@ def ssl_features(hostname: str, timeout: int = 10) -> dict:
         if exp:
             exp_dt = datetime.strptime(exp, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
             out["ssl_days_to_expiry"] = (exp_dt - datetime.now(timezone.utc)).days
+    except ssl.SSLCertVerificationError as e:
+        out["ssl_cert_error"] = str(e)
+    except ssl.SSLError as e:
+        out["ssl_cert_error"] = str(e)
     except Exception:
         pass
     return out
@@ -713,7 +717,20 @@ def _save_checkpoint(path: str, data: dict):
     """Atomic write: temp file + rename, so a crash never corrupts the checkpoint."""
     tmp = Path(path).with_suffix(".tmp")
     tmp.write_text(json.dumps(data, default=_json_default))
-    tmp.replace(path)
+    try:
+        tmp.replace(path)
+    except PermissionError as e:
+        # Some environments may lock or deny overwriting the checkpoint file.
+        try:
+            if Path(path).exists():
+                Path(path).unlink()
+            tmp.rename(path)
+        except Exception as fallback_e:
+            raise PermissionError(
+                f"Unable to save checkpoint {path} from temp file {tmp}: {e}. "
+                f"Fallback rename also failed: {fallback_e}. "
+                "Check file permissions and locks."
+            ) from fallback_e
 
 
 def _json_default(o):
@@ -727,23 +744,23 @@ def _sanitize_for_json(d: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# INPUT SECTION: read the Excel file into a pandas DataFrame and keep the
+# INPUT SECTION: read the CSV file into a pandas DataFrame and keep the
 # two columns that flow through to the final output:
-#   * OPE6_ID            — your unique institution key (join key for labels)
-#   * university_website — the URL to crawl
+#   * UNITID           — your unique institution key (join key for labels)
+#   * school.school_url — the URL to crawl
 # ---------------------------------------------------------------------------
 def load_university_urls(
-    excel_path: str,
-    url_column: str = "university_website",
-    id_column: str = "OPE6_ID",
+    csv_path: str,
+    url_column: str = "school.school_url",
+    id_column: str = "UNITID",
 ) -> pd.DataFrame:
-    """Read the input Excel and return [id_column, url_column, normalized_url]."""
-    # dtype=str on the ID column preserves leading zeros (OPE6 IDs like "001234")
-    input_df = pd.read_excel(excel_path, dtype={id_column: str})
+    """Read the input CSV and return [id_column, url_column, normalized_url]."""
+    # dtype=str on the ID column preserves leading zeros and institution identifiers.
+    input_df = pd.read_csv(csv_path, dtype={id_column: str})
     missing = [c for c in (id_column, url_column) if c not in input_df.columns]
     if missing:
         raise KeyError(
-            f"Column(s) {missing} not found in {excel_path}. "
+            f"Column(s) {missing} not found in {csv_path}. "
             f"Available: {list(input_df.columns)}"
         )
     out = input_df[[id_column, url_column]].copy()
@@ -751,28 +768,28 @@ def load_university_urls(
     out["normalized_url"] = out[url_column].astype(str).map(normalize_url)
     n_dupes = out["normalized_url"].duplicated().sum()
     if n_dupes:
-        print(f"note: {n_dupes} rows share a URL with another OPE6_ID; "
+        print(f"note: {n_dupes} rows share a URL with another UNITID; "
               "each URL is crawled once and features are joined back to every row.")
     return out
 
 
 def build_feature_dataframe(
-    excel_path: str,
-    url_column: str = "university_website",
-    id_column: str = "OPE6_ID",
+    csv_path: str,
+    url_column: str = "school.school_url",
+    id_column: str = "UNITID",
     checkpoint_path: str | None = None,
     output_csv: str | None = None,
     limit: int | None = None,
 ) -> pd.DataFrame:
     """
-    Read institutions from an Excel file, crawl each unique website once, and
-    return a DataFrame of [OPE6_ID, university_website, <features...>].
+    Read institutions from a CSV file, crawl each unique website once, and
+    return a DataFrame of [UNITID, school.school_url, <features...>].
     Resumes automatically from the checkpoint file if interrupted.
     """
     checkpoint_path = checkpoint_path or CONFIG["checkpoint_path"]
     output_csv = output_csv or CONFIG["output_csv"]
 
-    input_df = load_university_urls(excel_path, url_column=url_column, id_column=id_column)
+    input_df = load_university_urls(csv_path, url_column=url_column, id_column=id_column)
     unique_urls = input_df["normalized_url"].drop_duplicates().tolist()
     if limit:
         unique_urls = unique_urls[:limit]
@@ -781,21 +798,30 @@ def build_feature_dataframe(
     print(f"{len(input_df)} input rows | {len(unique_urls)} unique URLs to crawl | "
           f"{len(done)} already in checkpoint")
 
-    for i, url in enumerate(unique_urls, 1):
-        if url in done:
-            continue
-        print(f"[{i}/{len(unique_urls)}] crawling {url}")
-        try:
-            feats = crawl_site(url)
-        except Exception as e:
-            feats = {"input_url": url, "crawl_error": f"{type(e).__name__}: {e}"}
-        done[url] = _sanitize_for_json(feats)
+    try:
+        for i, url in enumerate(unique_urls, 1):
+            if url in done:
+                continue
+            print(f"[{i}/{len(unique_urls)}] crawling {url}")
+            try:
+                feats = crawl_site(url)
+            except Exception as e:
+                feats = {"input_url": url, "crawl_error": f"{type(e).__name__}: {e}"}
+            done[url] = _sanitize_for_json(feats)
+            _save_checkpoint(checkpoint_path, done)
+    except KeyboardInterrupt:
+        print("Interrupted by user; saving checkpoint before exit.")
         _save_checkpoint(checkpoint_path, done)
+        raise
+    except Exception as exc:
+        print(f"Unexpected error encountered: {exc}. Saving checkpoint before exiting.")
+        _save_checkpoint(checkpoint_path, done)
+        raise
 
     feats_df = pd.DataFrame(list(done.values()))
     feats_df = add_cross_site_features(feats_df)
 
-    # Join features back onto the input rows so OPE6_ID and the original
+    # Join features back onto the input rows so UNITID and the original
     # website string are the leading columns of the final DataFrame.
     df = input_df.merge(feats_df, left_on="normalized_url", right_on="input_url", how="left")
     if limit:
@@ -857,13 +883,13 @@ def add_cross_site_features(df: pd.DataFrame) -> pd.DataFrame:
 if __name__ == "__main__":
     # Command-line interface only — ignored when importing in Jupyter.
     ap = argparse.ArgumentParser(description="Extract structural website features for fraud modeling.")
-    ap.add_argument("excel_path", help="Excel file with OPE6_ID and university_website columns")
-    ap.add_argument("--url-column", default="university_website")
-    ap.add_argument("--id-column", default="OPE6_ID")
+    ap.add_argument("csv_path", help="CSV file with UNITID and school.school_url columns")
+    ap.add_argument("--url-column", default="school.school_url")
+    ap.add_argument("--id-column", default="UNITID")
     ap.add_argument("--limit", type=int, default=None, help="only process first N URLs (for testing)")
     ap.add_argument("--max-pages", type=int, default=None)
     args = ap.parse_args()
     if args.max_pages:
         CONFIG["max_pages_per_site"] = args.max_pages
-    build_feature_dataframe(args.excel_path, url_column=args.url_column,
+    build_feature_dataframe(args.csv_path, url_column=args.url_column,
                             id_column=args.id_column, limit=args.limit)

@@ -51,7 +51,7 @@ LIST_COLUMNS = [
     "sitemap_expected_sections",
 ]
 
-ID_COLUMNS = ["OPE6_ID", "university_website", "input_url", "registered_domain"]
+ID_COLUMNS = ["UNITID", "school.school_url", "input_url", "registered_domain"]
 
 # Raw numeric features carried through as-is (imputed if missing)
 PASSTHROUGH_NUMERIC = [
