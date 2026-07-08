@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from urllib import robotparser
+import random
 
 import pandas as pd
 import requests
@@ -81,6 +82,13 @@ CONFIG = {
     "max_sitemap_urls": 50_000,       # stop collecting URLs past this (sets sitemap_truncated)
     "save_url_inventory_dir": None,   # e.g. "url_inventories/" to save each site's URL list (.txt.gz)
 }
+# Whether to verify SSL certificates for HTTP requests and socket checks.
+# Set to False to bypass local issuer certificate failures (insecure).
+CONFIG.update({
+    "verify_ssl": True,
+    # Additional sleep (seconds) between completed site crawls to reduce load
+    "mid_run_pause_sec": 5,
+})
 
 # Domains treated as legitimacy-signaling outbound links
 TRUSTED_LINK_DOMAINS = {
@@ -174,7 +182,15 @@ def ssl_features(hostname: str, timeout: int = 10) -> dict:
     out = {"ssl_ok": False, "ssl_issuer_org": None, "ssl_org_validated": None,
            "ssl_days_to_expiry": None, "ssl_cert_error": None}
     try:
-        ctx = ssl.create_default_context()
+        # If global CONFIG disables verification, use an unverified context so
+        # we can still obtain certificate fields without raising.
+        if not CONFIG.get("verify_ssl", True):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        else:
+            ctx = ssl.create_default_context()
+
         with socket.create_connection((hostname, 443), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=hostname) as tls:
                 cert = tls.getpeercert()
@@ -182,7 +198,6 @@ def ssl_features(hostname: str, timeout: int = 10) -> dict:
         issuer = {k: v for pair in cert.get("issuer", ()) for k, v in pair}
         subject = {k: v for pair in cert.get("subject", ()) for k, v in pair}
         out["ssl_issuer_org"] = issuer.get("organizationName")
-        # OV/EV certs carry an organizationName in the *subject*; DV certs don't
         out["ssl_org_validated"] = "organizationName" in subject
         exp = cert.get("notAfter")
         if exp:
@@ -190,6 +205,27 @@ def ssl_features(hostname: str, timeout: int = 10) -> dict:
             out["ssl_days_to_expiry"] = (exp_dt - datetime.now(timezone.utc)).days
     except ssl.SSLCertVerificationError as e:
         out["ssl_cert_error"] = str(e)
+        # If verification failed but verification is disabled in CONFIG,
+        # attempt to fetch cert info with an unverified context.
+        if not CONFIG.get("verify_ssl", True):
+            try:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with socket.create_connection((hostname, 443), timeout=timeout) as sock:
+                    with ctx.wrap_socket(sock, server_hostname=hostname) as tls:
+                        cert = tls.getpeercert()
+                out["ssl_ok"] = True
+                issuer = {k: v for pair in cert.get("issuer", ()) for k, v in pair}
+                subject = {k: v for pair in cert.get("subject", ()) for k, v in pair}
+                out["ssl_issuer_org"] = issuer.get("organizationName")
+                out["ssl_org_validated"] = "organizationName" in subject
+                exp = cert.get("notAfter")
+                if exp:
+                    exp_dt = datetime.strptime(exp, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+                    out["ssl_days_to_expiry"] = (exp_dt - datetime.now(timezone.utc)).days
+            except Exception:
+                pass
     except ssl.SSLError as e:
         out["ssl_cert_error"] = str(e)
     except Exception:
@@ -458,11 +494,16 @@ def _save_url_inventory(site_domain: str, urls: list) -> None:
 # Polite HTTP session (rate-limited, user-agent, timeout enforcement)
 # ---------------------------------------------------------------------------
 class PoliteSession:
-    def __init__(self, delay: float):
+    def __init__(self, delay: float, verify: bool = True):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": CONFIG["user_agent"]})
+        # Allow request-level SSL verification control (requests `verify` flag)
+        self.verify = verify
+        self.session.verify = verify
         self.delay = delay
         self._last_request = 0.0
+        # Track hosts that required an unverified retry due to SSL errors
+        self.bypassed_hosts: set[str] = set()
 
     def _wait(self):
         elapsed = time.time() - self._last_request
@@ -472,13 +513,51 @@ class PoliteSession:
 
     def get(self, url: str, **kw):
         self._wait()
-        return self.session.get(url, timeout=CONFIG["request_timeout_sec"],
-                                allow_redirects=True, **kw)
+        # Respect per-session verify flag unless explicitly overridden
+        if "verify" not in kw:
+            kw["verify"] = self.verify
+        try:
+            return self.session.get(url, timeout=CONFIG["request_timeout_sec"],
+                                    allow_redirects=True, **kw)
+        except requests.exceptions.SSLError as e:
+            # If verify was enabled and the caller didn't explicitly set verify,
+            # retry once with verification disabled and record the bypass.
+            explicit_verify = "verify" in kw
+            kw_verify = kw.get("verify", True)
+            if not explicit_verify and self.verify and kw_verify:
+                host = urlparse(url).netloc.split(":")[0]
+                try:
+                    # retry unverified
+                    kw["verify"] = False
+                    resp = self.session.get(url, timeout=CONFIG["request_timeout_sec"],
+                                            allow_redirects=True, **kw)
+                    self.bypassed_hosts.add(host)
+                    return resp
+                except Exception:
+                    raise
+            raise
 
     def head(self, url: str, **kw):
         self._wait()
-        return self.session.head(url, timeout=CONFIG["request_timeout_sec"],
-                                 allow_redirects=True, **kw)
+        if "verify" not in kw:
+            kw["verify"] = self.verify
+        try:
+            return self.session.head(url, timeout=CONFIG["request_timeout_sec"],
+                                     allow_redirects=True, **kw)
+        except requests.exceptions.SSLError:
+            explicit_verify = "verify" in kw
+            kw_verify = kw.get("verify", True)
+            if not explicit_verify and self.verify and kw_verify:
+                host = urlparse(url).netloc.split(":")[0]
+                try:
+                    kw["verify"] = False
+                    resp = self.session.head(url, timeout=CONFIG["request_timeout_sec"],
+                                             allow_redirects=True, **kw)
+                    self.bypassed_hosts.add(host)
+                    return resp
+                except Exception:
+                    raise
+            raise
 
 
 def load_robots(base_url: str, sess: PoliteSession):
@@ -506,9 +585,10 @@ def crawl_site(start_url: str) -> dict:
         "tld": get_tld(start_url),
         "crawl_timestamp": datetime.now(timezone.utc).isoformat(),
         "crawl_error": None,
+        "ssl_bypass_used": False,
     }
 
-    sess = PoliteSession(CONFIG["request_delay_sec"])
+    sess = PoliteSession(CONFIG["request_delay_sec"], verify=CONFIG.get("verify_ssl", True))
     rp, robots_text = load_robots(start_url, sess)
     crawl_delay = rp.crawl_delay(CONFIG["user_agent"])
     if crawl_delay:
@@ -610,6 +690,11 @@ def crawl_site(start_url: str) -> dict:
 
     # Domain-level lookups
     result.update(ssl_features(hostname))
+    # reflect whether any host fetch used the unverified retry
+    try:
+        result["ssl_bypass_used"] = bool(sess.bypassed_hosts)
+    except Exception:
+        result["ssl_bypass_used"] = False
     result.update(whois_features(site_domain))
     return result
 
@@ -800,6 +885,8 @@ def build_feature_dataframe(
     done = _load_checkpoint(checkpoint_path)
     print(f"{len(input_df)} input rows | {len(unique_urls)} unique URLs to crawl | "
           f"{len(done)} already in checkpoint")
+    if not CONFIG.get("verify_ssl", True):
+        print("WARNING: SSL verification is DISABLED (insecure). Requests will bypass local issuer certificate errors.")
 
     try:
         for i, url in enumerate(unique_urls, 1):
@@ -812,6 +899,13 @@ def build_feature_dataframe(
                 feats = {"input_url": url, "crawl_error": f"{type(e).__name__}: {e}"}
             done[url] = _sanitize_for_json(feats)
             _save_checkpoint(checkpoint_path, done)
+            # polite mid-run pause between completed site crawls (jittered)
+            pause = float(CONFIG.get("mid_run_pause_sec", 0) or 0)
+            if pause and pause > 0:
+                jitter = pause * 0.5
+                sleep_time = pause + random.uniform(0, jitter)
+                print(f"pausing {sleep_time:.1f}s before next site to reduce load")
+                time.sleep(sleep_time)
     except KeyboardInterrupt:
         print("Interrupted by user; saving checkpoint before exit.")
         _save_checkpoint(checkpoint_path, done)
@@ -890,9 +984,12 @@ if __name__ == "__main__":
     ap.add_argument("--url-column", default="school.school_url")
     ap.add_argument("--id-column", default="UNITID")
     ap.add_argument("--limit", type=int, default=None, help="only process first N URLs (for testing)")
+    ap.add_argument("--insecure", action="store_true", help="Disable SSL certificate verification (insecure)")
     ap.add_argument("--max-pages", type=int, default=None)
     args = ap.parse_args()
     if args.max_pages:
         CONFIG["max_pages_per_site"] = args.max_pages
+    if args.insecure:
+        CONFIG["verify_ssl"] = False
     build_feature_dataframe(args.csv_path, url_column=args.url_column,
                             id_column=args.id_column, limit=args.limit)
