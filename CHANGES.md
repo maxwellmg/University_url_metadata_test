@@ -142,3 +142,44 @@ except Exception as exc:
 ---
 
 **All changes are complete and ready for testing.**
+
+
+'''
+For testing a single URL, you have a few options:
+
+Option 1: Create a minimal test CSV (simplest)
+
+cat > test_single.csv << 'EOF'
+UNITID,school.school_url
+001,https://example.edu
+EOF
+
+python university_site_features.py test_single.csv --limit 1
+
+This creates a one-row CSV and runs the scraper, outputting site_features.csv as usual.
+
+Option 2: Test directly in Python (no CSV file needed)
+
+from university_site_features import crawl_site, build_feature_dataframe
+import pandas as pd
+
+# Option 2a: Just scrape one site and inspect the dict
+result = crawl_site("https://example.edu")
+print(result)
+
+# Option 2b: Create a minimal DataFrame and run through the pipeline
+df_input = pd.DataFrame({
+    "UNITID": ["001"],
+    "school.school_url": ["https://example.edu"],
+    "normalized_url": ["https://example.edu"]
+})
+
+df_output = build_feature_dataframe("test.csv", limit=1)
+# This outputs site_features.csv
+
+Option 3: Test with SSL bypass enabled (if you're hitting cert errors)
+
+python university_site_features.py test_single.csv --insecure --limit 1
+
+The output site_features.csv will have the same columns regardless of input size—just one row.
+'''
