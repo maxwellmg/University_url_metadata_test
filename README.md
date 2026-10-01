@@ -216,5 +216,150 @@ standardize inside your cross-validation pipeline to avoid leakage.
 | `requirements.txt` | Dependencies |
 | `data_dictionary.csv` | Description of every scraped and engineered variable |
 | `site_features_checkpoint.json` | Auto-generated resume state (safe to delete to force a fresh crawl) |
+| `site_features_checkpoint_unsuccessful.json` | Failed URLs from last run (prioritized on retry) |
 | `site_features.csv` | Raw per-site features |
 | `model_matrix.csv` | Final numeric matrix |
+
+## Running the Code
+
+### Command Line (Terminal)
+
+**Basic crawl (multi-page mode, slow, feature-rich):**
+```bash
+python university_site_features.py universities.csv
+```
+
+**Home-page-only mode (fast, 1 request per site, minimal bot detection):**
+```bash
+python university_site_features.py universities.csv --home-only
+```
+
+**With options:**
+```bash
+# Crawl only first 10 URLs (for testing)
+python university_site_features.py universities.csv --limit 10
+
+# Skip SSL certificate verification (use with caution)
+python university_site_features.py universities.csv --insecure
+
+# Combine options
+python university_site_features.py universities.csv --home-only --insecure --limit 50
+
+# Custom column names
+python university_site_features.py universities.csv \
+  --url-column "website_url" \
+  --id-column "institution_id"
+
+# Override max pages per site (default 25)
+python university_site_features.py universities.csv --max-pages 10
+```
+
+**Running feature engineering after crawl:**
+```bash
+python site_feature_engineering.py site_features.csv --output model_matrix.csv
+```
+
+### Jupyter Notebook
+
+```python
+from university_site_features import build_feature_dataframe, CONFIG
+from site_feature_engineering import build_model_matrix, summarize
+
+# Crawl with default settings
+df = build_feature_dataframe(
+    "universities.csv",
+    url_column="school.school_url",
+    id_column="UNITID",
+    limit=10  # test with 10 URLs first
+)
+
+# Crawl with home-only mode
+CONFIG["scrape_home_only"] = True
+df = build_feature_dataframe("universities.csv", limit=10)
+
+# Engineer features
+X, report = build_model_matrix(df)
+summarize(report)
+
+# Final model matrix (drop metadata columns)
+X_model = X.drop(columns=["input_url", "registered_domain", "tld", "crawl_timestamp"])
+X_model.to_csv("model_ready.csv", index=False)
+```
+
+### Configuration Options
+
+Edit `CONFIG` dict at the top of `university_site_features.py` or mutate it in a notebook:
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `max_pages_per_site` | 25 | Max interior pages to crawl per site (multi-page mode only) |
+| `request_delay_sec` | 1.5 | Minimum seconds between HTTP requests to a site |
+| `request_timeout_sec` | 15 | Network timeout per request (seconds) |
+| `max_css_files_per_site` | 5 | CSS files fetched for content hashing (template reuse detection) |
+| `broken_link_sample_size` | 10 | Internal links spot-checked for 404s (multi-page mode) |
+| `verify_ssl` | `True` | Verify SSL certificates; set `False` to bypass cert errors (insecure) |
+| `mid_run_pause_sec` | 5 | Sleep between site crawls (only multi-page mode; home-only uses random 1-5s) |
+| `scrape_home_only` | `False` | If `True`, fetch only home page (ignore robots.txt, skip interior links) |
+| `collect_sitemap` | `True` | Discover and parse sitemaps for URL inventory features |
+| `max_sitemap_files` | 10 | Max sitemap index files to recurse through per site |
+| `max_sitemap_urls` | 50,000 | Max URLs to collect from sitemaps per site |
+| `save_url_inventory_dir` | `None` | If set (e.g., `"url_inventories/"`), save each site's URL list as gzipped text |
+| `checkpoint_path` | `"site_features_checkpoint.json"` | Where to auto-save progress (resumable on interrupt) |
+| `output_csv` | `"site_features.csv"` | Output file for raw crawled features |
+| `user_agent` | Descriptive bot string | Identifies crawler to servers; **edit before running** |
+
+**Example: Custom configuration in notebook:**
+```python
+from university_site_features import CONFIG, build_feature_dataframe
+
+# Fast crawl, minimal bot detection
+CONFIG["scrape_home_only"] = True
+CONFIG["request_delay_sec"] = 0.5  # speed up within-site requests
+CONFIG["max_pages_per_site"] = 5   # if multi-page mode is used
+
+# Save URL inventory (for later analysis)
+CONFIG["save_url_inventory_dir"] = "url_inventories/"
+
+df = build_feature_dataframe("universities.csv", limit=100)
+```
+
+## Workflow: Full Example
+
+```bash
+# Step 1: Crawl 100 universities, home-page-only (fast)
+python university_site_features.py universities.csv --home-only --limit 100
+
+# Step 2: If any fail, retry unsuccessful ones (auto-loads checkpoint_unsuccessful.json)
+python university_site_features.py universities.csv --home-only --insecure --limit 100
+
+# Step 3: Engineer features
+python site_feature_engineering.py site_features.csv
+
+# Step 4: Load model-ready matrix
+python -c "import pandas as pd; X = pd.read_csv('model_matrix.csv'); print(X.shape, X.head())"
+```
+
+## Troubleshooting
+
+**"Could not verify the SSL certificate"**
+- Add `--insecure` flag to bypass SSL verification
+- Or set `CONFIG["verify_ssl"] = False` in notebook
+
+**Crawl is too slow**
+- Use `--home-only` mode (1 request per site vs. 10–25+)
+- Lower `request_delay_sec` in CONFIG (default 1.5s)
+- Reduce `max_pages_per_site` (default 25)
+
+**Getting kicked from sites / bot detection**
+- Use `--home-only` mode (drastically fewer requests)
+- Increase delays: `CONFIG["mid_run_pause_sec"] = 10` (multi-page mode)
+- Spread crawls over time: interrupt and resume later
+
+**Resuming after interruption**
+- Re-run the same command; checkpoint file auto-saves after each site
+- Unsuccessful sites are logged to `site_features_checkpoint_unsuccessful.json` and retried first on next run
+
+**Memory issues with large URL lists**
+- Process in batches: `--limit 500` per run
+- Delete checkpoint after each batch if you don't need resume capability
+- Use terminal/`nohup` instead of Jupyter
