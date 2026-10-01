@@ -88,6 +88,9 @@ CONFIG.update({
     "verify_ssl": True,
     # Additional sleep (seconds) between completed site crawls to reduce load
     "mid_run_pause_sec": 5,
+    # If True, scrape only the home page to avoid bot detection and robots.txt issues.
+    # Output will have single-page features; multi-page aggregations omitted.
+    "scrape_home_only": False,
 })
 
 # Domains treated as legitimacy-signaling outbound links
@@ -574,7 +577,11 @@ def load_robots(base_url: str, sess: PoliteSession):
     return rp, robots_text
 
 def crawl_site(start_url: str) -> dict:
-    """Crawl one site (BFS, capped) and return aggregated features."""
+    """Crawl one site (single page or BFS-capped) and return features.
+    
+    If CONFIG['scrape_home_only'] is True, fetch only the home page (no robots.txt,
+    no interior link discovery). Otherwise, performs BFS crawl up to max_pages_per_site.
+    """
     start_url = normalize_url(start_url)
     site_domain = registered_domain(start_url)
     hostname = urlparse(start_url).netloc.split(":")[0]
@@ -589,6 +596,87 @@ def crawl_site(start_url: str) -> dict:
     }
 
     sess = PoliteSession(CONFIG["request_delay_sec"], verify=CONFIG.get("verify_ssl", True))
+
+    # ===== HOME-PAGE-ONLY MODE =====
+    if CONFIG.get("scrape_home_only", False):
+        try:
+            resp = sess.get(start_url)
+            if resp.status_code != 200 or "text/html" not in resp.headers.get("Content-Type", ""):
+                result["crawl_error"] = f"Landing page returned status {resp.status_code} or non-HTML"
+                result["landing_status_code"] = resp.status_code
+                result.update(ssl_features(hostname))
+                try:
+                    result["ssl_bypass_used"] = bool(sess.bypassed_hosts)
+                except Exception:
+                    result["ssl_bypass_used"] = False
+                result.update(whois_features(site_domain))
+                return result
+            
+            # Parse the landing page
+            try:
+                page_feats = extract_page_features(resp.text, resp.url, site_domain)
+            except Exception as e:
+                result["crawl_error"] = f"Page extraction failed: {type(e).__name__}"
+                result["landing_status_code"] = resp.status_code
+                result["https_redirect"] = resp.url.startswith("https://")
+                result.update(ssl_features(hostname))
+                try:
+                    result["ssl_bypass_used"] = bool(sess.bypassed_hosts)
+                except Exception:
+                    result["ssl_bypass_used"] = False
+                result.update(whois_features(site_domain))
+                return result
+            
+            # Record landing page metadata and single-page features
+            result["https_redirect"] = resp.url.startswith("https://")
+            result["landing_status_code"] = resp.status_code
+            result["pages_crawled"] = 1
+            result["word_count"] = page_feats["word_count"]
+            result["a_tag_count"] = page_feats["a_tag_count"]
+            result["internal_link_count"] = len(page_feats["internal_links"])
+            result["external_link_count"] = page_feats["external_link_count"]
+            result["trusted_link_count"] = page_feats["trusted_link_count"]
+            result["pdf_link_count"] = page_feats["pdf_link_count"]
+            result["img_count"] = page_feats["img_count"]
+            result["img_alt_count"] = page_feats["img_alt_count"]
+            result["img_alt_coverage"] = page_feats["img_alt_count"] / page_feats["img_count"] if page_feats["img_count"] else None
+            result["html_bytes"] = page_feats["html_bytes"]
+            result["text_bytes"] = page_feats["text_bytes"]
+            result["text_to_html_ratio"] = page_feats["text_bytes"] / page_feats["html_bytes"] if page_feats["html_bytes"] else None
+            result["structure_hash"] = page_feats["structure_hash"]
+            result["css_frameworks"] = sorted(page_feats["css_frameworks"])
+            result["uses_css_framework"] = bool(page_feats["css_frameworks"])
+            result["site_builders_detected"] = sorted(page_feats["site_builders"])
+            result["uses_site_builder"] = bool(page_feats["site_builders"] - {"wordpress"})
+            result["meta_generators"] = [page_feats["meta_generator"]] if page_feats["meta_generator"] else []
+            result["pct_pages_meta_description"] = 1.0 if page_feats["has_meta_description"] else 0.0
+            result["pct_pages_og_tags"] = 1.0 if page_feats["has_og_tags"] else 0.0
+            result["pct_pages_canonical"] = 1.0 if page_feats["has_canonical"] else 0.0
+            result["has_favicon"] = page_feats["has_favicon"]
+            result["has_edu_schema_markup"] = page_feats["has_edu_schema"]
+            result["num_subdomains_seen"] = len(page_feats["subdomains"])
+            result["mailto_count"] = len(page_feats["mailto_domains"])
+            result["free_email_hits"] = 0  # Placeholder for consistency
+            result["phone_number_hits"] = page_feats["phone_count"]
+            result["has_street_address"] = page_feats["has_street_address"]
+            result["ga_ua_ids"] = sorted(page_feats["ga_ua_ids"])
+            result["ga4_ids"] = sorted(page_feats["ga4_ids"])
+            result["gtm_ids"] = sorted(page_feats["gtm_ids"])
+            result["fb_pixel_ids"] = sorted(page_feats["fb_pixel_ids"])
+            
+        except Exception as e:
+            result["crawl_error"] = f"{type(e).__name__}: {e}"
+        
+        # Always attempt domain-level features regardless of page crawl success
+        result.update(ssl_features(hostname))
+        try:
+            result["ssl_bypass_used"] = bool(sess.bypassed_hosts)
+        except Exception:
+            result["ssl_bypass_used"] = False
+        result.update(whois_features(site_domain))
+        return result
+
+    # ===== MULTI-PAGE CRAWL MODE (ORIGINAL) =====
     rp, robots_text = load_robots(start_url, sess)
     crawl_delay = rp.crawl_delay(CONFIG["user_agent"])
     if crawl_delay:
@@ -639,6 +727,12 @@ def crawl_site(start_url: str) -> dict:
     if not pages:
         if not result.get("crawl_error"):
             result["crawl_error"] = "no HTML pages retrieved"
+        result.update(ssl_features(hostname))
+        try:
+            result["ssl_bypass_used"] = bool(sess.bypassed_hosts)
+        except Exception:
+            result["ssl_bypass_used"] = False
+        result.update(whois_features(site_domain))
         return result
 
     result.update(aggregate_site_features(pages, site_domain, response_headers))
@@ -986,10 +1080,14 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=None, help="only process first N URLs (for testing)")
     ap.add_argument("--insecure", action="store_true", help="Disable SSL certificate verification (insecure)")
     ap.add_argument("--max-pages", type=int, default=None)
+    ap.add_argument("--home-only", action="store_true", help="Scrape only home page (no interior links, no robots.txt)")
     args = ap.parse_args()
     if args.max_pages:
         CONFIG["max_pages_per_site"] = args.max_pages
     if args.insecure:
         CONFIG["verify_ssl"] = False
+    if args.home_only:
+        CONFIG["scrape_home_only"] = True
+        CONFIG["mid_run_pause_sec"] = 0  # No pause needed for single page per site
     build_feature_dataframe(args.csv_path, url_column=args.url_column,
                             id_column=args.id_column, limit=args.limit)
