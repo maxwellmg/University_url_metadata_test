@@ -967,20 +967,43 @@ def build_feature_dataframe(
     Read institutions from a CSV file, crawl each unique website once, and
     return a DataFrame of [UNITID, school.school_url, <features...>].
     Resumes automatically from the checkpoint file if interrupted.
+    Tracks successful vs unsuccessful scrapes and persists unsuccessful list for retry.
     """
     checkpoint_path = checkpoint_path or CONFIG["checkpoint_path"]
     output_csv = output_csv or CONFIG["output_csv"]
+    unsuccessful_path = Path(checkpoint_path).with_stem(
+        Path(checkpoint_path).stem + "_unsuccessful"
+    )
+    temp_checkpoint_interval = 50  # save temp checkpoint every 50 successes
 
     input_df = load_university_urls(csv_path, url_column=url_column, id_column=id_column)
     unique_urls = input_df["normalized_url"].drop_duplicates().tolist()
     if limit:
         unique_urls = unique_urls[:limit]
 
+    # Check if there's an unsuccessful scrapes file from a previous run; prioritize those
+    unsuccessful_urls = []
+    if unsuccessful_path.exists():
+        try:
+            unsuccessful_data = json.loads(unsuccessful_path.read_text())
+            if isinstance(unsuccessful_data, dict) and "unsuccessful_urls" in unsuccessful_data:
+                unsuccessful_urls = unsuccessful_data["unsuccessful_urls"]
+                print(f"Found {len(unsuccessful_urls)} unsuccessful URLs from previous run; "
+                      "prioritizing these for retry.")
+                # Move unsuccessful URLs to the front, preserving order of successful ones
+                unsuccessful_urls = [u for u in unsuccessful_urls if u in unique_urls]
+                unique_urls = unsuccessful_urls + [u for u in unique_urls if u not in unsuccessful_urls]
+        except Exception as e:
+            print(f"Warning: could not load unsuccessful scrapes file: {e}")
+
     done = _load_checkpoint(checkpoint_path)
     print(f"{len(input_df)} input rows | {len(unique_urls)} unique URLs to crawl | "
           f"{len(done)} already in checkpoint")
     if not CONFIG.get("verify_ssl", True):
         print("WARNING: SSL verification is DISABLED (insecure). Requests will bypass local issuer certificate errors.")
+
+    successful_count = 0
+    unsuccessful_scrapes = {}  # url -> error dict
 
     try:
         for i, url in enumerate(unique_urls, 1):
@@ -989,25 +1012,65 @@ def build_feature_dataframe(
             print(f"[{i}/{len(unique_urls)}] crawling {url}")
             try:
                 feats = crawl_site(url)
+                is_success = feats.get("crawl_error") is None
+                if is_success:
+                    successful_count += 1
+                else:
+                    unsuccessful_scrapes[url] = {"error": feats.get("crawl_error")}
             except Exception as e:
                 feats = {"input_url": url, "crawl_error": f"{type(e).__name__}: {e}"}
+                unsuccessful_scrapes[url] = {"error": feats.get("crawl_error")}
+            
             done[url] = _sanitize_for_json(feats)
             _save_checkpoint(checkpoint_path, done)
-            # polite mid-run pause between completed site crawls (jittered)
-            pause = float(CONFIG.get("mid_run_pause_sec", 0) or 0)
-            if pause and pause > 0:
-                jitter = pause * 0.5
-                sleep_time = pause + random.uniform(0, jitter)
-                print(f"pausing {sleep_time:.1f}s before next site to reduce load")
-                time.sleep(sleep_time)
+            
+            # Every 50 successful scrapes, save a temp checkpoint and print progress
+            if successful_count % temp_checkpoint_interval == 0 and successful_count > 0:
+                print(f"  [checkpoint] {successful_count} successful scrapes completed; "
+                      f"{len(unsuccessful_scrapes)} unsuccessful so far")
+            
+            # Random delay between 1-5 seconds before next site
+            delay = random.uniform(1, 5)
+            print(f"  waiting {delay:.1f}s before next site...")
+            time.sleep(delay)
     except KeyboardInterrupt:
-        print("Interrupted by user; saving checkpoint before exit.")
+        print("Interrupted by user; saving checkpoint and unsuccessful list before exit.")
         _save_checkpoint(checkpoint_path, done)
+        if unsuccessful_scrapes:
+            unsuccessful_path.write_text(json.dumps(
+                {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
+                 "unsuccessful_details": unsuccessful_scrapes},
+                default=_json_default, indent=2
+            ))
         raise
     except Exception as exc:
-        print(f"Unexpected error encountered: {exc}. Saving checkpoint before exiting.")
+        print(f"Unexpected error encountered: {exc}. Saving checkpoint and unsuccessful list before exiting.")
         _save_checkpoint(checkpoint_path, done)
+        if unsuccessful_scrapes:
+            unsuccessful_path.write_text(json.dumps(
+                {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
+                 "unsuccessful_details": unsuccessful_scrapes},
+                default=_json_default, indent=2
+            ))
         raise
+
+    # Save unsuccessful scrapes to file for next retry run
+    if unsuccessful_scrapes:
+        unsuccessful_path.write_text(json.dumps(
+            {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
+             "unsuccessful_details": unsuccessful_scrapes,
+             "total_attempted": len(done),
+             "total_successful": successful_count,
+             "total_unsuccessful": len(unsuccessful_scrapes)},
+            default=_json_default, indent=2
+        ))
+        print(f"\nSummary: {successful_count} successful, {len(unsuccessful_scrapes)} unsuccessful")
+        print(f"Unsuccessful scrapes saved to: {unsuccessful_path}")
+    else:
+        print(f"\nAll {successful_count} scrapes completed successfully!")
+        # Clean up unsuccessful file if everything passed
+        if unsuccessful_path.exists():
+            unsuccessful_path.unlink()
 
     feats_df = pd.DataFrame(list(done.values()))
     feats_df = add_cross_site_features(feats_df)

@@ -104,6 +104,58 @@ whole list — the fraud-network clustering signals:
   interrupted run resumes by rerunning the same command; corrupt checkpoints
   are renamed aside, never silently overwritten
 
+### Home-Page-Only Mode (`--home-only`)
+
+By default, the crawler performs a full breadth-first crawl of interior pages
+(up to the `max_pages_per_site` cap). To minimize bot detection and reduce
+crawl time, use the `--home-only` flag to scrape **only the home page**, skip
+robots.txt entirely, and make exactly one GET request per site.
+
+**Trade-off: Fields Captured vs. Not Captured**
+
+**CAPTURED (home page only):**
+- Metadata on landing page: word count, `<a>` tags, images, alt-text coverage
+- Links on landing page: internal, external, PDF, trusted-outbound link counts
+- Page quality: HTML/text bytes, text-to-HTML ratio, favicon, meta descriptions/OG tags, canonical links
+- Template signals: DOM structure hash, CSS frameworks, site-builder detection, meta generator
+- Analytics: Google Analytics (UA + GA4), GTM, Facebook pixel IDs (from landing page only)
+- Legitimacy: phone numbers, street addresses, e-mail domains, copyright year
+- Domain-level: TLD, HTTPS redirect status, SSL certificate metadata, SSL bypass flag
+- Whois: domain age, registrant privacy, registrant org
+
+**NOT CAPTURED (multi-page aggregations):**
+- Multi-page volume metrics: `total_a_tags`, `total_words`, `avg_words_per_page`, `total_images`, `avg_images_per_page`
+- Multi-page structure: `unique_dom_structures`, `dom_structure_diversity`, `boilerplate_ratio`, `avg_inline_styles_per_page`
+- Multi-page consistency: aggregated image alt-text coverage
+- Response headers: `server_headers`, `has_last_modified_header`
+- Analytics aggregation: GA/GTM/pixel IDs aggregated across pages
+- Legitimacy aggregation: `pdf_link_count`, `trusted_outbound_links`, `mailto_on_domain_ratio`, `free_email_hits`, `phone_number_hits`, copyright-year range
+- Sitemap & URL inventory: `sitemap_found`, `sitemap_url_count`, path depth/breadth, expected institutional sections, maintenance cadence, crawl censorship flag
+- Link quality: `broken_link_rate_sampled` (internal links checked for 404s)
+- Template reuse: `css_content_hashes` (CSS files collected and hashed for cross-site matching)
+- Subdomains: `num_subdomains_seen` (detected across only 1 page, not multiple)
+
+**Use home-only mode if:**
+- You want to minimize bot detection risk (1 request per site vs. 10–25+ per multi-page crawl)
+- You prioritize crawl speed over rich aggregated features
+- Primary institutions are small or single-page sites
+- You're doing a quick screening pass before detailed manual review
+
+**Use multi-page mode (default) if:**
+- You need fraud detection signals from site-wide structure (template cloning, boilerplate detection, cross-page consistency)
+- You want inventory validation (sitemap cross-reference)
+- You're modeling against a labeled dataset that benefits from rich aggregations
+- Your target institutions typically have 5+ pages of content
+
+**Command-line usage:**
+```bash
+# Home-page-only (fast, minimal bot detection)
+python university_site_features.py urls.csv --home-only --limit 100
+
+# Full crawl (slow, feature-rich, respects robots.txt)
+python university_site_features.py urls.csv --limit 100
+```
+
 ### Configuration
 
 Edit the `CONFIG` dict at the top of the script (or mutate it in the notebook
