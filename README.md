@@ -363,3 +363,46 @@ python -c "import pandas as pd; X = pd.read_csv('model_matrix.csv'); print(X.sha
 - Process in batches: `--limit 500` per run
 - Delete checkpoint after each batch if you don't need resume capability
 - Use terminal/`nohup` instead of Jupyter
+
+## Keep the Mac awake while a long crawl runs
+
+This project does not need a Python package named `python-caffinate`.
+On macOS, the built-in `caffeinate` command is the standard way to prevent
+sleep while the crawl is running:
+
+```bash
+caffeinate -dims python university_site_features.py university_urls.csv --limit 100
+```
+
+`-dims` keeps the machine awake by preventing idle sleep, display sleep, and
+system sleep while the scraper is active. You can also run:
+
+```bash
+caffeinate -dims python university_site_features.py university_urls.csv --home-only
+```
+
+If you want to leave a long run unattended, wrap the crawl command with
+`caffeinate -dims` and leave the terminal open until it completes.
+
+## Fresh start / wipe prior run state
+
+If you want a truly clean restart, delete the checkpoint and output files that
+store progress from prior runs before rerunning the scraper:
+
+```bash
+rm -f site_features_checkpoint.json site_features_checkpoint_unsuccessful.json site_features.csv
+```
+
+If you also saved URL inventories, clear those as well:
+
+```bash
+rm -rf url_inventories
+```
+
+This is the reset list to keep in mind:
+- `site_features_checkpoint.json` — saved per-URL crawl state for resume
+- `site_features_checkpoint_unsuccessful.json` — prior failed URLs that were retried
+- `site_features.csv` — raw output from the previous crawl
+- `url_inventories/` — optional saved page inventories for each domain
+
+After deleting these files, rerun the scraper and it will start from a clean slate.

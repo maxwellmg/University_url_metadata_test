@@ -40,6 +40,10 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from urllib import robotparser
 import random
+import os
+import platform
+import shutil
+import subprocess
 
 import pandas as pd
 import requests
@@ -91,9 +95,67 @@ CONFIG.update({
     # If True, scrape only the home page to avoid bot detection and robots.txt issues.
     # Output will have single-page features; multi-page aggregations omitted.
     "scrape_home_only": False,
+    # Keep the machine awake while a notebook or long-running scrape is active.
+    # Set to False to disable when you do not want to inhibit sleep.
+    "keep_awake": True,
 })
 
+_AWAKE_PROCESS = None
+
+
+def enable_keep_awake(enabled=None):
+    """Prevent the machine from sleeping while a notebook crawl is active."""
+    global _AWAKE_PROCESS
+
+    enabled = CONFIG.get("keep_awake", True) if enabled is None else enabled
+    if not enabled:
+        return None
+
+    system = platform.system().lower()
+
+    if system == "darwin":
+        if shutil.which("caffeinate"):
+            _AWAKE_PROCESS = subprocess.Popen(
+                ["caffeinate", "-dims"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return _AWAKE_PROCESS
+
+    elif system == "linux":
+        if shutil.which("systemd-inhibit"):
+            _AWAKE_PROCESS = subprocess.Popen(
+                [
+                    "systemd-inhibit",
+                    "--what=sleep",
+                    "--who=Jupyter",
+                    "--why=University website crawl",
+                    "--mode=block",
+                    "python",
+                    "-c",
+                    "import time; time.sleep(31536000)",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return _AWAKE_PROCESS
+
+    return None
+
+
+def disable_keep_awake():
+    global _AWAKE_PROCESS
+    if _AWAKE_PROCESS is not None and _AWAKE_PROCESS.poll() is None:
+        try:
+            _AWAKE_PROCESS.terminate()
+        except Exception:
+            pass
+    _AWAKE_PROCESS = None
+
+
+# ---------------------------------------------------------------------------
 # Domains treated as legitimacy-signaling outbound links
+# ---------------------------------------------------------------------------
 TRUSTED_LINK_DOMAINS = {
     "ed.gov", "studentaid.gov", "chea.org", "nces.ed.gov",
     "msche.org", "hlcommission.org", "sacscoc.org", "neche.org",
@@ -1101,7 +1163,10 @@ def build_feature_dataframe(
         if unsuccessful_scrapes:
             unsuccessful_path.write_text(json.dumps(
                 {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
-                 "unsuccessful_details": unsuccessful_scrapes},
+                 "unsuccessful_details": unsuccessful_scrapes,
+                 "total_attempted": len(done),
+                 "total_successful": successful_count,
+                 "total_unsuccessful": len(unsuccessful_scrapes)},
                 default=_json_default, indent=2
             ))
         raise
@@ -1142,6 +1207,31 @@ def build_feature_dataframe(
     if limit:
         df = df[df["input_url"].notna()].reset_index(drop=True)
     df = df.drop(columns=["normalized_url"], errors="ignore")
+
+    # A failed crawl should remain in the dataset but should not carry partial
+    # metadata as if it were a valid scraped site. Preserve identity/error
+    # diagnostics, blank the rest for failed rows.
+    if "crawl_error" in df.columns:
+        failed = df["crawl_error"].notna()
+        if failed.any():
+            keep_cols = {
+                id_column,
+                url_column,
+                "input_url",
+                "registered_domain",
+                "tld",
+                "crawl_timestamp",
+                "crawl_error",
+                "ssl_bypass_used",
+                "landing_status_code",
+                "https_redirect",
+                "pages_crawled",
+                "robots_blocked_count",
+            }
+            for col in list(df.columns):
+                if col in keep_cols:
+                    continue
+                df.loc[failed, col] = pd.NA
 
     df.to_csv(output_csv, index=False)
     print(f"Saved {len(df)} rows -> {output_csv}")
@@ -1205,6 +1295,8 @@ if __name__ == "__main__":
     ap.add_argument("--insecure", action="store_true", help="Disable SSL certificate verification (insecure)")
     ap.add_argument("--max-pages", type=int, default=None)
     ap.add_argument("--home-only", action="store_true", help="Scrape only home page (no interior links, no robots.txt)")
+    ap.add_argument("--keep-awake", action="store_true", help="Prevent sleep while the crawl is running")
+    ap.add_argument("--no-keep-awake", action="store_true", help="Disable sleep prevention during the crawl")
     args = ap.parse_args()
     if args.max_pages:
         CONFIG["max_pages_per_site"] = args.max_pages
@@ -1213,5 +1305,14 @@ if __name__ == "__main__":
     if args.home_only:
         CONFIG["scrape_home_only"] = True
         CONFIG["mid_run_pause_sec"] = 0  # No pause needed for single page per site
-    build_feature_dataframe(args.csv_path, url_column=args.url_column,
-                            id_column=args.id_column, limit=args.limit)
+    if args.keep_awake:
+        CONFIG["keep_awake"] = True
+    if args.no_keep_awake:
+        CONFIG["keep_awake"] = False
+
+    wake_proc = enable_keep_awake()
+    try:
+        build_feature_dataframe(args.csv_path, url_column=args.url_column,
+                                id_column=args.id_column, limit=args.limit)
+    finally:
+        disable_keep_awake()
