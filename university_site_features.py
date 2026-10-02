@@ -1211,27 +1211,26 @@ def build_feature_dataframe(
     # A failed crawl should remain in the dataset but should not carry partial
     # metadata as if it were a valid scraped site. Preserve identity/error
     # diagnostics, blank the rest for failed rows.
-    if "crawl_error" in df.columns:
-        failed = df["crawl_error"].notna()
-        if failed.any():
-            keep_cols = {
-                id_column,
-                url_column,
-                "input_url",
-                "registered_domain",
-                "tld",
-                "crawl_timestamp",
-                "crawl_error",
-                "ssl_bypass_used",
-                "landing_status_code",
-                "https_redirect",
-                "pages_crawled",
-                "robots_blocked_count",
-            }
-            for col in list(df.columns):
-                if col in keep_cols:
-                    continue
-                df.loc[failed, col] = pd.NA
+    failed = df["crawl_error"].notna()
+
+    keep_cols = {
+        "id",
+        "school.school_url",
+        "input_url",
+        "registered_domain",
+        "tld",
+        "crawl_timestamp",
+        "crawl_error",
+        "ssl_bypass_used",
+        "landing_status_code",
+        "https_redirect",
+        "pages_crawled",
+        "robots_blocked_count",
+    }
+
+    for col in df.columns:
+        if col not in keep_cols:
+            df.loc[failed, col] = pd.NA
 
     df.to_csv(output_csv, index=False)
     print(f"Saved {len(df)} rows -> {output_csv}")
