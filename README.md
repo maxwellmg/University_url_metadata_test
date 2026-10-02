@@ -49,7 +49,13 @@ df = build_feature_dataframe("university_urls.csv",
 X, report = build_model_matrix(df)
 summarize(report)
 
-X_model = X.drop(columns=["input_url", "registered_domain"])
+# Example: inspect both the raw and transformed versions of the same variable
+print(X[["UNITID", "source_total_a_tags", "log1p_total_a_tags", "crawl_failed"]].head())
+
+# If you want a strict model-ready subset, you can still keep only the engineered columns
+# or drop metadata fields explicitly before model fitting.
+X_model = X.drop(columns=[c for c in X.columns if c.startswith("source_") and c not in ["source_UNITID"]])
+X_model.to_csv("model_ready.csv", index=False)
 ```
 
 **Command line:**
@@ -170,26 +176,17 @@ lower `max_pages_per_site`.
 
 ## Script 2: `site_feature_engineering.py`
 
-Transforms the raw output into a numeric matrix:
+Transforms the raw output into a numeric matrix while preserving the original descriptive record:
 
-- **Derived features** — TLD dummy flags (`is_edu_tld`, etc.), domain age in
-  years, copyright staleness, tracker counts, per-page rates (PDFs/page,
-  trusted links/page), external-link share, trusted-share-of-external, and
-  `crawl_coverage_ratio` (pages crawled / sitemap census — an uncensored
-  size signal)
+- **Raw descriptive output retained** — original crawl fields are kept under the `source_` naming convention (`source_total_a_tags`, `source_tld`, etc.)
+- **Derived features appended** — TLD dummy flags (`is_edu_tld`, etc.), domain age in years, copyright staleness, tracker counts, per-page rates, external-link share, `crawl_coverage_ratio`, and other engineered variables
 - **Transforms** — `log1p` on heavy-tailed volume counts; booleans → 0/1
-- **Missingness as signal** — every imputed column gets a paired `*_missing`
-  indicator before median imputation (failed WHOIS/SSL lookups are themselves
-  informative for this problem)
-- **Failed crawls kept** — flagged via `crawl_failed`, never dropped
-- **Small-crawl guard** — within-site ratios (boilerplate, DOM diversity) are
-  nulled below `min_pages_for_ratios` pages (default 3) instead of
-  contributing noise
-- **Audit trail** — returns a `report` dict logging every imputation median
-  and dropped constant column
+- **Missingness as signal** — every imputed column gets a paired `*_missing` indicator before median imputation for successful rows only
+- **Failed crawls kept** — flagged via `crawl_failed`, never dropped; engineered columns for failed rows are left blank rather than median-imputed
+- **Small-crawl guard** — within-site ratios (boilerplate, DOM diversity) are nulled below `min_pages_for_ratios` pages (default 3) instead of contributing noise
+- **Audit trail** — returns a `report` dict logging every imputation median and dropped constant column
 
-Output is all-numeric with zero NaNs. Scaling is deliberately **not** applied —
-standardize inside your cross-validation pipeline to avoid leakage.
+Output is analytic, inclusive, and still suitable for modeling, but it preserves the raw descriptive data needed for auditing and feature review.
 
 ## Modeling caveats
 
@@ -281,8 +278,12 @@ df = build_feature_dataframe("universities.csv", limit=10)
 X, report = build_model_matrix(df)
 summarize(report)
 
-# Final model matrix (drop metadata columns)
-X_model = X.drop(columns=["input_url", "registered_domain", "tld", "crawl_timestamp"])
+# Example: inspect both the raw and transformed versions of the same variable
+print(X[["UNITID", "source_total_a_tags", "log1p_total_a_tags", "crawl_failed"]].head())
+
+# If you want a strict model-ready subset, you can still keep only the engineered columns
+# or drop metadata fields explicitly before model fitting.
+X_model = X.drop(columns=[c for c in X.columns if c.startswith("source_") and c not in ["source_UNITID"]])
 X_model.to_csv("model_ready.csv", index=False)
 ```
 
@@ -406,3 +407,38 @@ This is the reset list to keep in mind:
 - `url_inventories/` — optional saved page inventories for each domain
 
 After deleting these files, rerun the scraper and it will start from a clean slate.
+
+The pipeline now produces two complementary outputs:
+
+- `site_features.csv` — raw per-site crawl output; the canonical source of truth for detailed analysis
+- `model_matrix.csv` — an inclusive analytic matrix that keeps the raw source data under `source_` names and adds engineered/model-ready columns alongside it
+
+`model_matrix.csv` is intentionally not a stripped-down ML-only file: it preserves the descriptive source values needed for auditing, debugging, and exploratory analysis, while still transforming the data into a numeric matrix for modeling.
+
+The CSV file needs an institution key column and a URL column (defaults:
+`UNITID` and `school.school_url`; scheme optional — `www.example.edu` is
+fine). `UNITID` is read as a string to preserve leading zeros and is carried
+through both output files as the join key for labels and Scorecard/SEVIS data.
+Duplicate URLs are crawled once and their features joined back to every
+matching input row.
+
+### `source_` naming convention
+
+In `model_matrix.csv`, every original `site_features.csv` column is preserved with a `source_` prefix so that it is easy to distinguish raw descriptive data from engineered fields.
+
+Examples:
+
+- `source_total_a_tags`
+- `source_tld`
+- `source_pages_crawled`
+- `source_uses_css_framework`
+
+The ID columns remain in their original names, for example `UNITID` and `school.school_url`, while the raw descriptive columns live under `source_...`.
+
+This means you can analyze both versions side by side:
+
+- `source_total_a_tags` = original raw value from the crawl
+- `log1p_total_a_tags` = transformed model-ready feature
+- `crawl_failed` = failed-row flag
+
+This also makes failed-row handling explicit: if a row failed, its transformed/model-ready columns are left blank while the raw `source_...` descriptive values remain available for investigation.

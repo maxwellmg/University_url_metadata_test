@@ -1,4 +1,5 @@
 variable,dataset,stage,data_type,description,modeling_notes
+model_matrix_policy,documentation,design,string,"The model matrix is intentionally inclusive: it preserves all original site_features columns (including UNITID and descriptive fields) and appends engineered/derived features. Failed rows keep their descriptive columns but leave engineered values blank rather than imputing them.",Use model_matrix.csv for both raw descriptive analysis and ML-ready transforms; keep site_features.csv as the complete source of truth.
 input_url,both,identifier,string,Normalized input URL for the site (https:// prepended if missing).,ID column; drop before modeling.
 registered_domain,both,identifier,string,"Registrable domain of the site (e.g., example.edu), via tldextract if installed.",ID column; drop before modeling. Join key for labels.
 tld,site_features.csv,scraped,string,"Top-level domain / public suffix of the site (edu, com, ac.uk, ...).",Encoded as dummy flags in model matrix.
@@ -119,4 +120,5 @@ sitemap_lastmod_span_days,both,scraped,int or null,Days between oldest and newes
 crawl_censored,both,scraped,bool (0/1 in matrix),"1 if the crawl hit the page cap AND the sitemap census shows the site is larger than the cap — i.e., volume features are truncated for this site.",Use to interpret size features honestly.
 crawl_coverage_ratio,model_matrix.csv,engineered,"float (0,1]","pages_crawled / sitemap_url_count, capped at 1; share of the site the capped crawl actually saw. Near 1 for tiny sites, near 0 for real universities.","Inverse, uncensored size signal; null (imputed+flagged) when no sitemap."
 log1p_sitemap_url_count,model_matrix.csv,engineered,float,log(1 + sitemap_url_count); uncensored site size on a tame scale.,Restores the size axis the 25-page crawl cap censors.
-log1p_sitemap_pdf_count,model_matrix.csv,engineered,float,log(1 + sitemap_pdf_count).,
+log1p_sitemap_pdf_count,model_matrix.csv,engineered,float,log(1 + sitemap_pdf_count).
+source_*,both,raw,string or numeric,"Every original site_features column is preserved in the model matrix under a `source_` prefix (for example, `source_total_a_tags`, `source_tld`, `source_UNITID`).",This keeps the complete raw descriptive record available for analysis while engineered features remain unprefixed and model-ready.

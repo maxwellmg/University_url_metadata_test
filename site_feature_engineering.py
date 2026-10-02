@@ -123,7 +123,7 @@ def build_model_matrix(
     source: str | pd.DataFrame,
     output_csv: str | None = "model_matrix.csv",
     min_pages_for_ratios: int = 3,
-    drop_constant_columns: bool = True,
+    drop_constant_columns: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Parameters
@@ -134,12 +134,14 @@ def build_model_matrix(
     min_pages_for_ratios : within-site ratio features (boilerplate, diversity)
              are unreliable on tiny crawls; below this page count they are set
              to NaN and picked up by the missing-indicator machinery instead.
-    drop_constant_columns : drop features with zero variance in this sample.
+    drop_constant_columns : compatibility flag. Default is False so the output
+             stays inclusive and preserves the original site_features columns
+             alongside the engineered variables.
 
     Returns
     -------
-    (X, report) : model-ready DataFrame (ID columns + numeric features) and a
-                  dict documenting imputation medians, dropped columns, etc.
+    (X, report) : a more inclusive matrix with raw descriptive columns retained
+                  and engineered features appended.
     """
     df = pd.read_csv(source) if isinstance(source, str) else source.copy()
     report = {"n_rows_in": len(df)}
@@ -151,13 +153,24 @@ def build_model_matrix(
         else:
             df[col] = [[] for _ in range(len(df))]
 
-    X = pd.DataFrame(index=df.index)
-    for col in ID_COLUMNS:
-        if col in df.columns:
+    # Keep the original descriptive site_features columns in the output so the
+    # matrix can be analyzed alongside the engineered features. Raw columns are
+    # prefixed with `source_` to distinguish them from engineered features.
+    raw_id_cols = [c for c in ["UNITID", "school.school_url", "input_url", "registered_domain"] if c in df.columns]
+    raw_non_id_cols = [c for c in df.columns if c not in raw_id_cols]
+    rename_map = {c: f"source_{c}" for c in raw_non_id_cols}
+    X = df.rename(columns=rename_map).copy()
+    raw_cols = list(X.columns)
+    failed = df.get("crawl_error", pd.Series([None] * len(df))).notna()
+
+    # Preserve the identity keys in their original form while leaving the rest of
+    # the raw descriptive data under the `source_` naming convention.
+    for col in raw_id_cols:
+        if col in X.columns:
             X[col] = df[col]
 
     # -- 1. crawl-quality flags (keep failed rows, flagged) --------------------
-    X["crawl_failed"] = df.get("crawl_error", pd.Series([None] * len(df))).notna().astype(int)
+    X["crawl_failed"] = failed.astype(int)
     X["pages_hit_cap"] = 0
     if "pages_crawled" in df.columns:
         cap = df["pages_crawled"].max()
@@ -221,8 +234,6 @@ def build_model_matrix(
             pd.to_numeric(df["trusted_outbound_links"], errors="coerce") / ext.replace(0, np.nan)
         )
 
-    # crawl coverage: share of the site (per sitemap census) the capped crawl saw;
-    # near 1 for tiny sites, near 0 for real universities — an uncensored size signal
     if "sitemap_url_count" in df.columns:
         sm = pd.to_numeric(df["sitemap_url_count"], errors="coerce").replace(0, np.nan)
         X["crawl_coverage_ratio"] = (pages / sm).clip(upper=1.0)
@@ -237,7 +248,6 @@ def build_model_matrix(
         if col in df.columns:
             X[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # unreliable within-site ratios on tiny crawls -> NaN (handled in step 9)
     if "pages_crawled" in df.columns:
         tiny = pd.to_numeric(df["pages_crawled"], errors="coerce") < min_pages_for_ratios
         for col in ("boilerplate_ratio", "dom_structure_diversity"):
@@ -250,30 +260,43 @@ def build_model_matrix(
         if col in df.columns:
             X[col] = _to_numeric_bool(df[col])
 
-    # -- 9. missingness: indicator + median imputation ---------------------------------
-    feature_cols = [c for c in X.columns if c not in ID_COLUMNS]
+    # -- 9. failed crawls remain blank and are not median-imputed ----------------
+    engineered_cols = [
+        c for c in X.columns if c not in raw_cols and c not in {"crawl_failed", "pages_hit_cap"}
+    ]
+    if failed.any():
+        X.loc[failed, engineered_cols] = np.nan
+
+    # -- 10. missingness: indicator + median imputation on non-failed rows only --
+    feature_cols = [c for c in engineered_cols if c in X.columns]
     imputed = {}
     indicators = {}
     for col in feature_cols:
-        if X[col].isna().any():
-            indicators[f"{col}_missing"] = X[col].isna().astype(int)
-            med = X[col].median()
-            med = 0.0 if pd.isna(med) else float(med)  # all-NaN column
-            X[col] = X[col].fillna(med)
+        missing_mask = X[col].isna()
+        indicators[f"{col}_missing"] = missing_mask.astype(int)
+        impute_mask = (~failed) & missing_mask
+        if impute_mask.any():
+            med = X.loc[~failed, col].median()
+            med = 0.0 if pd.isna(med) else float(med)
+            X.loc[impute_mask, col] = med
             imputed[col] = med
+        else:
+            imputed[col] = np.nan
     if indicators:
         X = pd.concat([X, pd.DataFrame(indicators, index=X.index)], axis=1)
     report["imputation_medians"] = imputed
 
-    # -- 10. drop constants --------------------------------------------------------------
+    # -- 11. drop constants ---------------------------------------------------------
     dropped = []
     if drop_constant_columns:
-        for col in [c for c in X.columns if c not in ID_COLUMNS]:
+        for col in [c for c in X.columns if c not in raw_cols and c not in {"crawl_failed", "pages_hit_cap"}]:
             if X[col].nunique(dropna=False) <= 1:
                 dropped.append(col)
         X = X.drop(columns=dropped)
     report["dropped_constant_columns"] = dropped
-    report["n_features_out"] = len([c for c in X.columns if c not in ID_COLUMNS])
+    report["n_features_out"] = len(
+        [c for c in X.columns if c not in raw_cols and c not in {"crawl_failed", "pages_hit_cap"}]
+    )
 
     if output_csv:
         X.to_csv(output_csv, index=False)
