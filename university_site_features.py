@@ -1101,7 +1101,7 @@ def build_feature_dataframe(
     if limit:
         unique_urls = unique_urls[:limit]
 
-    # Check if there's an unsuccessful scrapes file from a previous run; prioritize those
+    # Prior unsuccessful URLs are retried first, but this is informational rather than a warning.
     unsuccessful_urls = []
     if unsuccessful_path.exists():
         try:
@@ -1112,14 +1112,12 @@ def build_feature_dataframe(
                       "prioritizing these for retry.")
                 unsuccessful_urls = [u for u in unsuccessful_urls if u in unique_urls]
                 unique_urls = unsuccessful_urls + [u for u in unique_urls if u not in unsuccessful_urls]
-        except Exception as e:
-            print(f"Warning: could not load unsuccessful scrapes file: {e}")
+        except Exception:
+            pass
 
     done = _load_checkpoint(checkpoint_path)
     print(f"{len(input_df)} input rows | {len(unique_urls)} unique URLs to crawl | "
           f"{len(done)} already in checkpoint")
-    if not CONFIG.get("verify_ssl", True):
-        print("WARNING: SSL verification is DISABLED (insecure). Requests will bypass local issuer certificate errors.")
 
     successful_count = 0
     unsuccessful_scrapes = {}  # url -> error dict
@@ -1143,7 +1141,7 @@ def build_feature_dataframe(
                 unsuccessful_scrapes[url] = {"error": feats.get("crawl_error")}
                 retry_queue.append(url)
 
-            done[url] = _sanitize_for_json(feats)
+            done[url] = feats
             _save_checkpoint(checkpoint_path, done)
 
             if unsuccessful_scrapes:
@@ -1178,7 +1176,7 @@ def build_feature_dataframe(
                     feats = {"input_url": url, "crawl_error": f"{type(e).__name__}: {e}"}
                     unsuccessful_scrapes[url] = {"error": feats.get("crawl_error")}
 
-                done[url] = _sanitize_for_json(feats)
+                done[url] = feats
                 _save_checkpoint(checkpoint_path, done)
                 try:
                     _save_unsuccessful(str(unsuccessful_path), unsuccessful_scrapes)
