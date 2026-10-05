@@ -946,9 +946,32 @@ def aggregate_site_features(pages: list, site_domain: str, headers: list) -> dic
 # ---------------------------------------------------------------------------
 # Checkpointing + pipeline
 # ---------------------------------------------------------------------------
+def _cleanup_checkpoint_artifacts(path: str):
+    """Remove stale temp/corrupt checkpoint artifacts left by interrupted writes."""
+    p = Path(path)
+    for suffix in (".tmp", ".corrupt.csv", ".corrupt.json"):
+        temp_path = p.with_suffix(p.suffix + suffix)
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+    if p.with_suffix(".corrupt.csv").exists():
+        try:
+            p.with_suffix(".corrupt.csv").unlink()
+        except Exception:
+            pass
+    if p.with_suffix(".corrupt.json").exists():
+        try:
+            p.with_suffix(".corrupt.json").unlink()
+        except Exception:
+            pass
+
+
 def _load_checkpoint(path: str) -> dict:
     """Load a CSV checkpoint produced by the crawler. Keys are input URLs."""
     p = Path(path)
+    _cleanup_checkpoint_artifacts(path)
     if not p.exists():
         return {}
     try:
@@ -973,11 +996,12 @@ def _load_checkpoint(path: str) -> dict:
 
 
 def _save_checkpoint(path: str, data: dict):
-    """Save the current crawl state as CSV in append-friendly mode.
+    """Write a checkpoint with atomic temp-file replacement.
 
-    This intentionally avoids in-place JSON replacement and file locking issues on
-    Windows when a process still holds the checkpoint handle. We keep a CSV file
-    that accumulates completed URLs and reuses it on the next run.
+    This avoids the Windows file-lock / invalid-argument race that occurs when the
+    same CSV is read and overwritten in place while the process still holds a
+    handle to it. We merge any existing rows, deduplicate by input_url, then save
+    to a temporary CSV and replace the live file once complete.
     """
     p = Path(path)
     rows = []
@@ -999,12 +1023,22 @@ def _save_checkpoint(path: str, data: dict):
     if p.exists():
         try:
             existing = pd.read_csv(p)
-            frame = pd.concat([existing, frame], ignore_index=True)
-            frame = frame.drop_duplicates(subset=["input_url"], keep="last")
+            if "input_url" in existing.columns:
+                existing = existing[existing["input_url"].notna()].copy()
+                frame = pd.concat([existing, frame], ignore_index=True)
+                frame = frame.drop_duplicates(subset=["input_url"], keep="last")
         except Exception:
             pass
 
-    frame.to_csv(p, index=False)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    try:
+        frame.to_csv(tmp, index=False)
+        os.replace(tmp, p)
+    except Exception:
+        try:
+            frame.to_csv(p, index=False)
+        except Exception:
+            pass
 
 
 def _load_unsuccessful(path: str) -> dict:
@@ -1037,7 +1071,16 @@ def _save_unsuccessful(path: str, unsuccessful: dict):
             row.update(info)
         rows.append(row)
     if rows:
-        pd.DataFrame(rows).to_csv(p, index=False)
+        frame = pd.DataFrame(rows)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        try:
+            frame.to_csv(tmp, index=False)
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                frame.to_csv(p, index=False)
+            except Exception:
+                pass
     elif p.exists():
         try:
             p.unlink()
@@ -1091,9 +1134,11 @@ def build_feature_dataframe(
     """
     checkpoint_path = checkpoint_path or CONFIG["checkpoint_path"]
     output_csv = output_csv or CONFIG["output_csv"]
+    _cleanup_checkpoint_artifacts(checkpoint_path)
     unsuccessful_path = Path(checkpoint_path).with_stem(
         Path(checkpoint_path).stem + "_unsuccessful"
     )
+    _cleanup_checkpoint_artifacts(str(unsuccessful_path))
     temp_checkpoint_interval = 50  # save temp checkpoint every 50 successes
 
     input_df = load_university_urls(csv_path, url_column=url_column, id_column=id_column)
