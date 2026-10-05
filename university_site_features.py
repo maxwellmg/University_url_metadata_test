@@ -78,7 +78,7 @@ CONFIG = {
         "(academic research on institutional website structure; "
         "contact: <university email>.edu)"
     ),
-    "checkpoint_path": "site_features_checkpoint.json",
+    "checkpoint_path": "site_features_checkpoint.csv",
     "output_csv": "site_features.csv",
     # --- sitemap / URL-inventory module ---
     "collect_sitemap": True,          # fetch sitemap.xml and derive inventory features
@@ -947,44 +947,102 @@ def aggregate_site_features(pages: list, site_domain: str, headers: list) -> dic
 # Checkpointing + pipeline
 # ---------------------------------------------------------------------------
 def _load_checkpoint(path: str) -> dict:
+    """Load a CSV checkpoint produced by the crawler. Keys are input URLs."""
     p = Path(path)
-    if p.exists():
+    if not p.exists():
+        return {}
+    try:
+        df = pd.read_csv(p)
+    except Exception:
         try:
-            return json.loads(p.read_text())
-        except json.JSONDecodeError:
-            # corrupt checkpoint -> back it up rather than crash
-            p.rename(p.with_suffix(".corrupt.json"))
-    return {}
+            p.rename(p.with_suffix(".corrupt.csv"))
+        except Exception:
+            pass
+        return {}
+
+    if df.empty:
+        return {}
+
+    out = {}
+    for _, row in df.iterrows():
+        url = row.get("input_url")
+        if pd.isna(url) or str(url) == "nan":
+            continue
+        out[str(url)] = row.to_dict()
+    return out
 
 
 def _save_checkpoint(path: str, data: dict):
-    """Atomic write: temp file + rename, so a crash never corrupts the checkpoint."""
-    tmp = Path(path).with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, default=_json_default))
-    try:
-        tmp.replace(path)
-    except PermissionError as e:
-        # Some environments may lock or deny overwriting the checkpoint file.
+    """Save the current crawl state as CSV in append-friendly mode.
+
+    This intentionally avoids in-place JSON replacement and file locking issues on
+    Windows when a process still holds the checkpoint handle. We keep a CSV file
+    that accumulates completed URLs and reuses it on the next run.
+    """
+    p = Path(path)
+    rows = []
+    for url, feats in data.items():
+        row = {"input_url": url}
+        if isinstance(feats, dict):
+            row.update({k: v for k, v in feats.items()})
+        rows.append(row)
+
+    if not rows:
+        if p.exists():
+            try:
+                p.unlink()
+            except Exception:
+                pass
+        return
+
+    frame = pd.DataFrame(rows)
+    if p.exists():
         try:
-            if Path(path).exists():
-                Path(path).unlink()
-            tmp.rename(path)
-        except Exception as fallback_e:
-            raise PermissionError(
-                f"Unable to save checkpoint {path} from temp file {tmp}: {e}. "
-                f"Fallback rename also failed: {fallback_e}. "
-                "Check file permissions and locks."
-            ) from fallback_e
+            existing = pd.read_csv(p)
+            frame = pd.concat([existing, frame], ignore_index=True)
+            frame = frame.drop_duplicates(subset=["input_url"], keep="last")
+        except Exception:
+            pass
+
+    frame.to_csv(p, index=False)
 
 
-def _json_default(o):
-    if isinstance(o, set):
-        return sorted(o)
-    return str(o)
+def _load_unsuccessful(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        return {"unsuccessful_urls": [], "unsuccessful_details": {}}
+    try:
+        df = pd.read_csv(p)
+    except Exception:
+        return {"unsuccessful_urls": [], "unsuccessful_details": {}}
+    if df.empty:
+        return {"unsuccessful_urls": [], "unsuccessful_details": {}}
+    details = {}
+    urls = []
+    for _, row in df.iterrows():
+        url = row.get("input_url")
+        if pd.isna(url) or str(url) == "nan":
+            continue
+        urls.append(str(url))
+        details[str(url)] = {k: v for k, v in row.to_dict().items() if k != "input_url"}
+    return {"unsuccessful_urls": list(dict.fromkeys(urls)), "unsuccessful_details": details}
 
 
-def _sanitize_for_json(d: dict) -> dict:
-    return json.loads(json.dumps(d, default=_json_default))
+def _save_unsuccessful(path: str, unsuccessful: dict):
+    p = Path(path)
+    rows = []
+    for url, info in unsuccessful.items():
+        row = {"input_url": url}
+        if isinstance(info, dict):
+            row.update(info)
+        rows.append(row)
+    if rows:
+        pd.DataFrame(rows).to_csv(p, index=False)
+    elif p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1047,12 +1105,11 @@ def build_feature_dataframe(
     unsuccessful_urls = []
     if unsuccessful_path.exists():
         try:
-            unsuccessful_data = json.loads(unsuccessful_path.read_text())
-            if isinstance(unsuccessful_data, dict) and "unsuccessful_urls" in unsuccessful_data:
-                unsuccessful_urls = unsuccessful_data["unsuccessful_urls"]
+            unsuccessful_data = _load_unsuccessful(str(unsuccessful_path))
+            unsuccessful_urls = unsuccessful_data.get("unsuccessful_urls", [])
+            if unsuccessful_urls:
                 print(f"Found {len(unsuccessful_urls)} unsuccessful URLs from previous run; "
                       "prioritizing these for retry.")
-                # Move unsuccessful URLs to the front, preserving order of successful ones
                 unsuccessful_urls = [u for u in unsuccessful_urls if u in unique_urls]
                 unique_urls = unsuccessful_urls + [u for u in unique_urls if u not in unsuccessful_urls]
         except Exception as e:
@@ -1068,9 +1125,6 @@ def build_feature_dataframe(
     unsuccessful_scrapes = {}  # url -> error dict
 
     try:
-        # First pass: attempt each unique URL once. Record failures to a
-        # persistent unsuccessful file as they occur but do not retry them
-        # until the initial pass over all sites completes.
         retry_queue: list[str] = []
         for i, url in enumerate(unique_urls, 1):
             if url in done:
@@ -1089,36 +1143,25 @@ def build_feature_dataframe(
                 unsuccessful_scrapes[url] = {"error": feats.get("crawl_error")}
                 retry_queue.append(url)
 
-            # persist site result and checkpoint immediately
             done[url] = _sanitize_for_json(feats)
             _save_checkpoint(checkpoint_path, done)
 
-            # persist unsuccessful list incrementally so it's available mid-run
             if unsuccessful_scrapes:
                 try:
-                    unsuccessful_path.write_text(json.dumps(
-                        {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
-                         "unsuccessful_details": unsuccessful_scrapes},
-                        default=_json_default, indent=2
-                    ))
+                    _save_unsuccessful(str(unsuccessful_path), unsuccessful_scrapes)
                 except Exception:
                     pass
 
-            # Every 50 successful scrapes, print progress
             if successful_count % temp_checkpoint_interval == 0 and successful_count > 0:
-                print(f"  [checkpoint] {successful_count} successful scrapes completed; "
-                      f"{len(unsuccessful_scrapes)} unsuccessful so far")
+                print(f"  [checkpoint] {successful_count} successful scrapes completed; {len(unsuccessful_scrapes)} unsuccessful so far")
 
-            # Random delay between 1-5 seconds before next site
             delay = random.uniform(1, 5)
             print(f"  waiting {delay:.1f}s before next site...")
             time.sleep(delay)
 
-        # SECOND PASS: attempt retries for URLs that failed on the first pass.
         if retry_queue:
             print(f"\nStarting retry pass for {len(retry_queue)} unsuccessful URLs...")
             for j, url in enumerate(list(retry_queue), 1):
-                # Skip if another run already recorded success for this URL
                 if url in done and not done[url].get("crawl_error"):
                     unsuccessful_scrapes.pop(url, None)
                     continue
@@ -1137,13 +1180,8 @@ def build_feature_dataframe(
 
                 done[url] = _sanitize_for_json(feats)
                 _save_checkpoint(checkpoint_path, done)
-                # update persistent unsuccessful list after each retry
                 try:
-                    unsuccessful_path.write_text(json.dumps(
-                        {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
-                         "unsuccessful_details": unsuccessful_scrapes},
-                        default=_json_default, indent=2
-                    ))
+                    _save_unsuccessful(str(unsuccessful_path), unsuccessful_scrapes)
                 except Exception:
                     pass
                 time.sleep(random.uniform(1, 3))
@@ -1151,46 +1189,27 @@ def build_feature_dataframe(
         print("Interrupted by user; saving checkpoint and unsuccessful list before exit.")
         _save_checkpoint(checkpoint_path, done)
         if unsuccessful_scrapes:
-            unsuccessful_path.write_text(json.dumps(
-                {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
-                 "unsuccessful_details": unsuccessful_scrapes},
-                default=_json_default, indent=2
-            ))
+            _save_unsuccessful(str(unsuccessful_path), unsuccessful_scrapes)
         raise
     except Exception as exc:
         print(f"Unexpected error encountered: {exc}. Saving checkpoint and unsuccessful list before exiting.")
         _save_checkpoint(checkpoint_path, done)
         if unsuccessful_scrapes:
-            unsuccessful_path.write_text(json.dumps(
-                {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
-                 "unsuccessful_details": unsuccessful_scrapes,
-                 "total_attempted": len(done),
-                 "total_successful": successful_count,
-                 "total_unsuccessful": len(unsuccessful_scrapes)},
-                default=_json_default, indent=2
-            ))
+            _save_unsuccessful(str(unsuccessful_path), unsuccessful_scrapes)
         raise
 
-    # Save unsuccessful scrapes to file for next retry run
     if unsuccessful_scrapes:
-        unsuccessful_path.write_text(json.dumps(
-            {"unsuccessful_urls": list(unsuccessful_scrapes.keys()),
-             "unsuccessful_details": unsuccessful_scrapes,
-             "total_attempted": len(done),
-             "total_successful": successful_count,
-             "total_unsuccessful": len(unsuccessful_scrapes)},
-            default=_json_default, indent=2
-        ))
+        _save_unsuccessful(str(unsuccessful_path), unsuccessful_scrapes)
         print(f"\nSummary: {successful_count} successful, {len(unsuccessful_scrapes)} unsuccessful")
         print(f"Unsuccessful scrapes saved to: {unsuccessful_path}")
     else:
         print(f"\nAll {successful_count} scrapes completed successfully!")
-        # Clean up unsuccessful file if everything passed
         if unsuccessful_path.exists():
-            unsuccessful_path.unlink()
+            try:
+                unsuccessful_path.unlink()
+            except Exception:
+                pass
 
-    # Ensure checkpoint entries are structurally consistent so DataFrame ops
-    # (and later column drops) don't raise KeyError when some sites failed early.
     for _u, _v in done.items():
         if isinstance(_v, dict):
             if "tld" not in _v:
@@ -1201,36 +1220,32 @@ def build_feature_dataframe(
     feats_df = pd.DataFrame(list(done.values()))
     feats_df = add_cross_site_features(feats_df)
 
-    # Join features back onto the input rows so UNITID and the original
-    # website string are the leading columns of the final DataFrame.
     df = input_df.merge(feats_df, left_on="normalized_url", right_on="input_url", how="left")
     if limit:
         df = df[df["input_url"].notna()].reset_index(drop=True)
     df = df.drop(columns=["normalized_url"], errors="ignore")
 
-    # A failed crawl should remain in the dataset but should not carry partial
-    # metadata as if it were a valid scraped site. Preserve identity/error
-    # diagnostics, blank the rest for failed rows.
-    failed = df["crawl_error"].notna()
-
-    keep_cols = {
-        "id",
-        "school.school_url",
-        "input_url",
-        "registered_domain",
-        "tld",
-        "crawl_timestamp",
-        "crawl_error",
-        "ssl_bypass_used",
-        "landing_status_code",
-        "https_redirect",
-        "pages_crawled",
-        "robots_blocked_count",
-    }
-
-    for col in df.columns:
-        if col not in keep_cols:
-            df.loc[failed, col] = pd.NA
+    if "crawl_error" in df.columns:
+        failed = df["crawl_error"].notna()
+        if failed.any():
+            keep_cols = {
+                id_column,
+                url_column,
+                "input_url",
+                "registered_domain",
+                "tld",
+                "crawl_timestamp",
+                "crawl_error",
+                "ssl_bypass_used",
+                "landing_status_code",
+                "https_redirect",
+                "pages_crawled",
+                "robots_blocked_count",
+            }
+            for col in list(df.columns):
+                if col in keep_cols:
+                    continue
+                df.loc[failed, col] = pd.NA
 
     df.to_csv(output_csv, index=False)
     print(f"Saved {len(df)} rows -> {output_csv}")
