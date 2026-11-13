@@ -418,6 +418,39 @@ VAR _t1 = IF ( _isHigh, _mon, _opt )
 VAR _t2 = _stb
 VAR _t3 = IF ( _isHigh, _opt, _mon )
 
+-- ===== Smart decimals: fewest decimals (0, 1 or 2) that lose nothing =====
+VAR _allWhole =
+    ROUND ( _t1, 0 ) = ROUND ( _t1, 2 )
+        && ROUND ( _t2, 0 ) = ROUND ( _t2, 2 )
+        && ROUND ( _t3, 0 ) = ROUND ( _t3, 2 )
+VAR _allTenths =
+    ROUND ( _t1, 1 ) = ROUND ( _t1, 2 )
+        && ROUND ( _t2, 1 ) = ROUND ( _t2, 2 )
+        && ROUND ( _t3, 1 ) = ROUND ( _t3, 2 )
+VAR _tFmt =
+    IF ( _allWhole, "0", IF ( _allTenths, "0.0", "0.00" ) )
+
+-- ===== Label collision avoidance =====
+VAR _s1 = FORMAT ( _t1, _tFmt )
+VAR _s2 = FORMAT ( _t2, _tFmt )
+VAR _s3 = FORMAT ( _t3, _tFmt )
+VAR _chars = MAX ( LEN ( _s1 ), MAX ( LEN ( _s2 ), LEN ( _s3 ) ) )
+VAR _gap   = _chars * 6 + 6        -- minimum distance between label centers (px)
+VAR _minX  = _chars * 3 + 2        -- keeps labels inside the image
+VAR _maxX  = 328 - _minX
+
+-- 1. Push the outer labels away from the middle one
+VAR _p1 = MIN ( _b1, _b2 - _gap )
+VAR _p3 = MAX ( _b3, _b2 + _gap )
+-- 2. If that went off the left edge, slide the group right
+VAR _q1 = MAX ( _p1, _minX )
+VAR _q2 = MAX ( _b2, _q1 + _gap )
+VAR _q3 = MAX ( _p3, _q2 + _gap )
+-- 3. If that went off the right edge, slide the group left
+VAR _x3 = MIN ( _q3, _maxX )
+VAR _x2 = MIN ( _q2, _x3 - _gap )
+VAR _x1 = MIN ( _q1, _x2 - _gap )
+
 -- Segment colors left to right
 VAR _c1 = IF ( _isHigh, _red,    _blue )
 VAR _c2 = IF ( _isHigh, _yellow, _green )
@@ -431,9 +464,9 @@ VAR _rects =
     "<rect x='" & _b3 & "' y='" & _barY & "' width='" & ( _right - _b3 ) & "' height='" & _barH & "' fill='" & _c4 & "'/>"
 
 VAR _labels =
-    "<text x='" & _b1 & "' y='" & _lblY & "' text-anchor='middle'>" & FORMAT ( _t1, "0.00" ) & "</text>" &
-    "<text x='" & _b2 & "' y='" & _lblY & "' text-anchor='middle'>" & FORMAT ( _t2, "0.00" ) & "</text>" &
-    "<text x='" & _b3 & "' y='" & _lblY & "' text-anchor='middle'>" & FORMAT ( _t3, "0.00" ) & "</text>"
+    "<text x='" & _x1 & "' y='" & _lblY & "' text-anchor='middle'>" & _s1 & "</text>" &
+    "<text x='" & _x2 & "' y='" & _lblY & "' text-anchor='middle'>" & _s2 & "</text>" &
+    "<text x='" & _x3 & "' y='" & _lblY & "' text-anchor='middle'>" & _s3 & "</text>"
 
 VAR _marker =
     "<line x1='" & _xVal & "' x2='" & _xVal & "' y1='" & ( _barY - 3 ) & "' y2='" & ( _barY + _barH + 3 ) &
