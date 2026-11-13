@@ -371,6 +371,15 @@ VAR _yellow = "%23F2C94C"
 VAR _green  = "%2327AE60"
 VAR _blue   = "%232F80ED"
 
+-- ===== Canvas =====
+VAR _barW    = 484                 -- bar length (px)
+VAR _canvasW = _barW + 28          -- 14 px margin each side
+VAR _canvasH = 46
+VAR _scale   = 1                   -- 1 = native size; 1.5 = 50% bigger, etc.
+VAR _svgSize =
+    "viewBox='0 0 " & _canvasW & " " & _canvasH & "' width='" & _canvasW * _scale &
+    "' height='" & _canvasH * _scale & "'"
+
 -- ===== Binary icon =====
 VAR _pass      = _binVal = 1
 VAR _iconColor = IF ( _pass, _green, _red )
@@ -382,7 +391,7 @@ VAR _iconMark =
     )
 VAR _iconSvg =
     "data:image/svg+xml;utf8," &
-    "<svg xmlns='http://www.w3.org/2000/svg' width='328' height='46' font-family='Segoe UI' font-size='11' fill='%23333333'>" &
+    "<svg xmlns='http://www.w3.org/2000/svg' " & _svgSize & " font-family='Segoe UI' font-size='11' fill='%23333333'>" &
     "<circle cx='23' cy='23' r='9' fill='" & _iconColor & "'/>" &
     _iconMark &
     "<text x='38' y='27' font-weight='bold'>" & IF ( _pass, "Pass", "Fail" ) & "</text>" &
@@ -398,7 +407,6 @@ VAR _span = ( _max + _pad ) - _lo
 
 -- Layout (pixels)
 VAR _left  = 14
-VAR _barW  = 300
 VAR _right = _left + _barW
 VAR _barY  = 16
 VAR _barH  = 14
@@ -437,7 +445,7 @@ VAR _s3 = FORMAT ( _t3, _tFmt )
 VAR _chars = MAX ( LEN ( _s1 ), MAX ( LEN ( _s2 ), LEN ( _s3 ) ) )
 VAR _gap   = _chars * 6 + 6        -- minimum distance between label centers (px)
 VAR _minX  = _chars * 3 + 2        -- keeps labels inside the image
-VAR _maxX  = 328 - _minX
+VAR _maxX  = _canvasW - _minX
 
 -- 1. Push the outer labels away from the middle one
 VAR _p1 = MIN ( _b1, _b2 - _gap )
@@ -476,7 +484,7 @@ VAR _marker =
 
 VAR _barSvg =
     "data:image/svg+xml;utf8," &
-    "<svg xmlns='http://www.w3.org/2000/svg' width='328' height='46' font-family='Segoe UI' font-size='10' fill='%23333333'>" &
+    "<svg xmlns='http://www.w3.org/2000/svg' " & _svgSize & " font-family='Segoe UI' font-size='10' fill='%23333333'>" &
     _rects & _labels & _marker &
     "</svg>"
 
