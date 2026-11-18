@@ -1,0 +1,253 @@
+Proposal: Dataverse as the Automation Layer for Data Intake
+Nov 16, 2026
+Executive summary
+For roughly $1,500 a year in GCC High licenses (example sizing), we can automate the conversion of incoming submissions into Power BI-ready files and return [TBD] staff hours a month to analysis.
+• What changes: Dataverse becomes a short-term staging and automation layer between the offices that send data and the SharePoint files Power BI reads. Submissions are collected, reshaped, checked and published without manual handling.
+• What stays the same: SharePoint remains the low-cost system of record. Dashboards keep their current sources, and contributors keep emailing their files.
+• Why it stays cheap: Dataverse holds only data in flight and deletes it once published. The program stays within the storage included with its licenses rather than buying Dataverse capacity, listed at $40 per GB per month in the commercial cloud.
+• Why standard licenses can't do this: Excel-based flows run into connector limits on file size, row-by-row writes and file locking. The usual workaround, Office Scripts, isn't available in GCC High.
+• The ask: a handful of premium licenses for the team that runs the pipeline, one Dataverse environment, and a pilot on one data stream with a go/no-go review.
+Current state: staff hand-convert every submission before Power BI can use it
+Data reaches the program two ways: as email attachments from contributing offices, and through Power Apps forms that save to Excel in SharePoint. Before any of it appears on a dashboard, a staff member opens it, reshapes it to the dashboard's layout, and pastes it into the right workbook.
+• Labor: [TBD: hours per month, from the staff survey] at [TBD: loaded labor rate], or [TBD] per year spent on conversion rather than analysis.
+• Errors: each copy-paste step can drop rows, duplicate them, or rename a column a dashboard depends on. Nothing checks a submission before it lands.
+• Delay: dashboards are only as current as the last manual update, so leadership sees data that is [TBD: typical lag] old.
+• Platform limits: with standard licenses only, Excel acts as the database behind Power Apps and Power Automate, and it was not built for that. When Power Apps cannot pass a query to Excel, it processes the first 500 records by default, and 2,000 at most (Microsoft Learn). The Excel Online (Business) connector supports files up to 25 MB and can lock a file for up to six minutes after use (Microsoft Learn).
+Proposed solution: Dataverse as a staging layer, SharePoint as the record
+Dataverse sits between the offices that send data and the files Power BI reads. It holds each submission only while it is collected, reshaped and checked. It then hands a clean file to SharePoint and deletes its own copy.
+The only step that needs a person is the exception review, and only for rows that fail validation.
+How it works: five automated steps replace the manual conversion
+1.  Collect. A flow watches a shared intake mailbox. When a submission arrives, it saves the attachment to a SharePoint intake folder and logs the sender, time and file in a Dataverse submissions table. Existing Power Apps forms keep working unchanged in the pilot.
+2.  Load and reshape. A Dataverse dataflow (Power Query Online) reads new files from the intake folder, maps each contributor's layout to one standard layout, and loads the rows into Dataverse staging tables. The mapping is built once per contributor instead of being repeated by hand every cycle. A dataflow can refresh up to 48 times a day, once every 30 minutes (Microsoft Learn).
+3.  Validate. Dataverse enforces column types and required fields. Alternate keys make a resubmitted file update its rows instead of duplicating them, as Microsoft documents for loading many Excel files into one table (Microsoft Learn). Rows that fail go to an exception view for a reviewer, and the flow emails the contributor what to fix.
+4.  Publish. On a set schedule, a flow writes each period's validated rows to a new file in the SharePoint library that Power BI already reads. Each file name carries its reporting period and publish date.
+5.  Purge. A recurring bulk-delete job removes staged rows once their file is published and confirmed. Bulk delete can be scheduled every 7, 30, 90, 180 or 365 days (Microsoft Learn). Bulk-deleted data can't be recovered, so the job only touches rows already confirmed in SharePoint.
+Dataverse therefore holds weeks of working data, not years of history. SharePoint stays the system of record, at the storage cost the program already pays.
+Publish as CSV, not Excel
+We recommend CSV for the files the automation writes and Power BI reads. People keep using Excel for the files they edit, and Excel opens the CSV files directly.
+
+Excel, through the Excel Online (Business) connector
+CSV, written to SharePoint
+File size
+25 MB maximum per file
+No Excel-connector limit
+How rows are written
+Its actions work on Excel tables, a call per row, capped at 100 calls per minute per connection
+Whole batch written in one step
+Reading rows back
+Returns 256 rows by default unless paging is turned on
+Read whole by Power BI
+Locking
+File can stay locked up to 6 minutes after the connector uses it
+Each run writes a new file, so nothing is locked
+GCC High
+The Run script action (Office Scripts) isn't available in sovereign clouds, so there is no bulk workaround
+Not affected
+Source for the Excel column: Excel Online (Business) connector, Microsoft Learn.
+Why Dataverse rather than the alternatives
+Dataverse is the only option that adds automated reshaping and validation without new infrastructure. Every alternative that can automate the work also needs a premium license or a new Azure service.
+Option
+Licenses
+Automated reshaping
+Validation and duplicate prevention
+New infrastructure
+Dataverse as staging (proposed)
+A few premium licenses for the team that runs it
+Dataflows map each contributor's layout once
+Typed columns, required fields, alternate keys, duplicate detection
+None. It runs inside the existing GCC High Power Platform
+Stay on standard licenses (Excel + SharePoint)
+None new
+Row-by-row Excel actions only, with no Office Scripts in GCC High
+Has to be hand-built in each flow
+None
+SharePoint lists as staging
+None new
+Not possible: dataflows load only into Dataverse or Azure Data Lake (Microsoft Learn)
+Basic column settings, no alternate keys
+None
+Azure SQL Database
+SQL is a premium connector too, so the same licenses are needed (Microsoft)
+Custom pipelines
+Full, but built and maintained by developers
+Azure Government subscription, database administration, and its own authorization work
+Standard licenses only move the manual work into fragile flows. Azure SQL buys the same automation at the price of a new system to secure and maintain.
+Cost: licenses for the few people who run the pipeline, not for contributors
+Premium licenses go only to the people who build, run and review the pipeline. Contributors who email submissions need no new license, and Power BI viewers keep reading SharePoint as they do today.
+Role
+License
+Why it's needed
+GCC High list price per user
+Quantity
+Annual cost
+Pipeline owner (one service or admin account)
+Power Apps Premium
+Dataflows that load Dataverse require a Power Apps license (Microsoft Learn)
+$33.80/month, $405.60/year
+1
+$405.60
+Pipeline owner (same account)
+Power Automate Premium
+Email-triggered and scheduled flows that use Dataverse outside an app need it (Microsoft)
+$25.40/month, $304.80/year
+1
+$304.80
+Exception reviewers
+Power Apps Premium
+To correct rejected rows in Dataverse
+$33.80/month, $405.60/year
+[TBD, example: 2]
+[TBD, example: $811.20]
+Contributors who email data
+None
+They never sign in to the Power Platform
+—
+All
+$0
+Total
+
+
+
+
+[TBD, example: $1,521.60 a year]
+Prices are reseller-listed MSRP for the GCC High SKUs SEN-00001 and 1O7-00001 (Secureframe, Secureframe). The Government's contract vehicle may price them differently, so we will confirm with a quote. If many staff later need to trigger the same flow, a Power Automate Process license ($253.20/month list, SKU 8F7-00001) licenses that one automation instead (Secureframe).
+Storage stays inside the included capacity
+The first Power Apps or Power Automate subscription gives the tenant a one-time default Dataverse allocation (Microsoft Learn). For a Power Apps per-user plan, that is 10 GB of database, 20 GB of file and 2 GB of log capacity (Microsoft Learn). Each Power Apps Premium license adds 250 MB of database and 2 GB of file capacity (Microsoft Learn Q&A).
+Extra database capacity is the expensive item, listed at $40 per GB per month in the commercial cloud (o365hq). The design avoids buying any: rows are purged once published, so Dataverse holds about one cycle of submissions. We will measure actual use in the pilot and set the purge schedule to stay under the default.
+Return on investment: licenses pay for themselves within the first few hours saved
+The example license cost of $1,521.60 a year is recovered by about 15 hours of work a year at an illustrative loaded rate of $100 an hour. That is roughly 1.3 hours a month. The staff survey will replace these illustrations with the program's own figures.
+\text{Annual savings} = \text{hours per month} \times 12 \times \text{loaded hourly rate} \times \text{share of work automated}
+\text{Payback (months)} = \frac{\text{annual license cost} + \text{build cost}}{\text{annual savings} / 12}
+Input
+Value
+Source
+Hours per month spent converting submissions
+[TBD]
+Staff survey
+Loaded hourly rate
+[TBD]
+Contract labor categories
+Share of that work the pipeline automates
+[TBD, measured in pilot]
+Pilot results
+Annual license cost
+[TBD, example: $1,521.60]
+Cost section
+One-time build cost
+[TBD]
+Implementation plan
+Three gains don't show up in the formula:
+• Fewer errors: each row is checked before it reaches a dashboard, and resubmissions update rows instead of duplicating them.
+• Fresher dashboards: data can flow through every 30 minutes instead of waiting for someone to get to it.
+• Accountability: every submission is logged with its sender, time and outcome, so a disputed number can be traced to its source file.
+Security and compliance: the data never leaves the existing GCC High tenant
+The pipeline runs entirely inside the Government's current GCC High tenant. It adds no new cloud service, vendor or identity system.
+• Authorization: Microsoft designed Power Apps GCC High to meet DISA SRG IL4, and DISA has granted it a Provisional Authority to Operate. Microsoft also runs it so DoD contractors can meet ITAR and DFARS obligations (Microsoft Learn). Microsoft lists Dataverse as generally available at FedRAMP High and DoD IL4 in Azure Government (Microsoft Learn).
+• Identity: GCC High requires Microsoft Entra Government for user identities (Microsoft Learn), so existing accounts, multifactor rules and conditional access apply unchanged.
+• Least privilege: Dataverse security roles limit staged rows to the pipeline account and named reviewers.
+• Audit trail: Dataverse auditing logs user access and changes made to records (Microsoft Learn).
+• Less data held: staged rows are deleted once published, so Dataverse never becomes a second long-term copy of program data.
+• Connector control: new connectors are disabled by default in GCC High, and admins decide which ones to allow (Microsoft Learn).
+Before the pilot, we will confirm with the program's ISSM whether enabling a Dataverse environment requires an update to the system security plan.
+Implementation plan: prove it on one data stream, then expand
+We start with one email-based data stream and expand only after a go/no-go review. Phase durations will be set with the Government once the pilot stream is chosen.
+The pilot is judged on these measures at Gate 2:
+Measure
+Pilot target
+How it's measured
+Staff hours on the pilot stream
+[TBD, against the survey baseline]
+Time log compared with the baseline
+Submissions processed without manual handling
+[TBD]
+Dataverse submissions log
+Duplicate rows reaching Power BI
+None
+Alternate-key checks and Power BI totals
+Time from submission to dashboard
+[TBD]
+Submission time compared with publish time
+Dataverse database use
+Within the default allocation
+Power Platform admin center
+Risks and mitigations
+The two risks to settle before the pilot are feature availability in GCC High and licensing compliance. Both are checked in the first week.
+Risk
+Effect
+Mitigation
+A feature such as dataflows is unavailable or delayed in GCC High
+The reshaping step needs another route
+Check in the tenant in week 1 against Microsoft's US Government availability summary (Microsoft Learn). Fallback: a flow reads table-formatted submissions under 25 MB and writes the rows to Dataverse
+Routing Power Apps users' data through one licensed account counts as multiplexing
+Additional licenses owed
+Microsoft states that multiplexing doesn't reduce the licenses required (Microsoft). The pilot uses email intake only; Power Apps streams join after written confirmation from Microsoft or the reseller, or with those users licensed
+Daily API request limits
+Loads slow down or fail
+Each paid license includes 40,000 requests per 24 hours (Microsoft Learn). Dataflows load in batches, and usage is measured in the pilot
+A purge removes rows that weren't safely published
+Data loss
+Purge only rows whose published file is confirmed. Original attachments stay in the SharePoint intake folder
+A contributor changes its file layout
+Rows fail to load
+Unrecognized layouts go to the exception view, never to dashboards, and the owner is alerted
+One person holds the know-how
+Pipeline stalls when that person leaves
+A Government-owned service account, a named co-owner, and a runbook delivered with the pilot
+Lock-in
+Hard to leave the platform later
+Program data lives in SharePoint CSV files, so turning Dataverse off loses only data in flight
+Decision requested
+We ask the Government to approve three things:
+1.  Licenses: [TBD, example: 3] Power Apps Premium and 1 Power Automate Premium license in GCC High, [TBD: bought by the Government, or by the contractor and billed as other direct costs].
+2.  Environment: a Dataverse environment in the program's GCC High tenant, owned by a Government service account.
+3.  Pilot: a pilot on one email-based data stream, ending in a go/no-go review against the success measures in the implementation plan.
+Next steps once approved:
+[ ] Confirm dataflows and the other required features are enabled in the tenant
+[ ] Request a GCC High license quote through the Government's contract vehicle
+[ ] Review the design with the program ISSM
+[ ] Choose the pilot data stream and record its current manual hours as the baseline
+Appendix: assumptions, open inputs and sources
+Assumptions: contributors send Excel or CSV attachments by email; Power BI users are already licensed and read files from SharePoint; prices are reseller-listed MSRP as of November 2026.
+Open input
+Used in
+Status
+Manual hours per month on conversion
+Return on investment
+Staff survey under way
+Loaded hourly labor rate
+Return on investment
+[TBD]
+Number of data streams and submissions per month
+Sizing, API use, pilot choice
+[TBD]
+Number of exception reviewers
+License count
+[TBD]
+Number of internal Power Apps submitters
+Licensing route for phase 2
+[TBD]
+Data sensitivity (CUI, PII)
+Security review
+[TBD]
+Who buys the licenses
+Decision requested
+[TBD]
+Sources
+• Excel Online (Business) connector, Microsoft Learn
+• Delegation warnings, limits and non-delegable functions, Microsoft Learn
+• What licenses do you need to use dataflows?, Microsoft Learn
+• Create and use dataflows in Power Platform, Microsoft Learn
+• Sync Excel data with Dataverse using a dataflow, Microsoft Learn
+• Bulk delete, Microsoft Learn
+• Power Apps US Government, Microsoft Learn
+• Azure Government product GA roadmap, Microsoft Learn
+• New connectors disabled by default in GCC High and DoD, Microsoft Learn
+• Dataverse auditing overview, Microsoft Learn
+• Plan and manage license and capacity allocations, Microsoft Learn
+• Determine storage requirements, Microsoft Learn
+• Dataverse storage capacity Q&A, Microsoft Learn
+• Platform limits, Microsoft Learn
+• Managed environments licensing updates and licensing FAQ, Microsoft Power Platform blog
+• Multiplexing guidance, Microsoft Licensing
+• Power Apps Premium GCC High, Power Automate Premium GCC High and Power Automate Process GCC High list prices, Secureframe
+• Dataverse capacity and pricing, o365hq
